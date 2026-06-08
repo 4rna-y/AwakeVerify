@@ -1,0 +1,26 @@
+{
+    "UserConfig": {
+        "Namespaces": [
+            {
+                "Name": "local",
+                "Queues": [
+                    {
+                        "Name": "frame-processing-queue",
+                        "Properties": {
+                            "DefaultMessageTimeToLive": "PT1H",
+                            "DeadLetteringOnMessageExpiration": false,
+                            "LockDuration": "PT1M",
+                            "MaxDeliveryCount": 10,
+                            "RequireSession": false,
+                            "MaxSizeInMegabytes": 1024
+                        }
+                    }
+                ],
+                "Topics": []
+            }
+        ],
+        "Logging": {
+            "Type": "File"
+        }
+    }
+}

@@ -1,0 +1,68 @@
+{
+    "name": "AwakeVerify",
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "devcontainer",
+    "workspaceFolder": "/workspace",
+    "shutdownAction": "stopCompose",
+
+    "features": {
+        "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+            "moby" : false
+        },
+        "ghcr.io/devcontainers/features/git:1": {}
+    },
+
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-dotnettools.csdevkit",
+                "ms-dotnettools.csharp",
+                "ms-dotnettools.vscode-dotnet-runtime",
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.debugpy",
+                "dbaeumer.vscode-eslint",
+                "esbenp.prettier-vscode",
+                "bradlc.vscode-tailwindcss",
+                "ms-azuretools.vscode-docker",
+                "ms-azuretools.vscode-azurestorage",
+                "ckolkman.vscode-postgres",
+                "redis.iotools",
+                "EditorConfig.EditorConfig",
+                "streetsidesoftware.code-spell-checker"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/local/bin/python3",
+                "python.terminal.activateEnvironment": true,
+                "[csharp]": {
+                    "editor.defaultFormatter": "ms-dotnettools.csdevkit"
+                },
+                "terminal.integrated.defaultProfile.linux": "bash"
+            }
+        }
+    },
+    "forwardPorts": [
+        3000, 
+        5000, 
+        5001, 
+        5432, 
+        6379, 
+        10000, 
+        10001, 
+        10002, 
+        5672
+    ],
+    "portsAttributes": {
+        "3000":  { "label": "Next.js" },
+        "5000":  { "label": "ASP.NET Core HTTP" },
+        "5001":  { "label": "ASP.NET Core HTTPS" },
+        "5432":  { "label": "PostgreSQL" },
+        "6379":  { "label": "Redis" },
+        "10000": { "label": "Azurite (Blob)" },
+        "10001": { "label": "Azurite (Queue)" },
+        "10002": { "label": "Azurite (Table)" },
+        "5672":  { "label": "Service Bus AMQP" }
+    },
+    "postCreateCommand": "bash /workspace/.devcontainer/post-create.sh",
+    "remoteUser": "vscode"
+}

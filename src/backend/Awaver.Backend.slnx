@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Awaver.Backend.Tests/Awaver.Backend.Tests.csproj" />
+  <Project Path="Awaver.Backend/Awaver.Backend.csproj" />
+</Solution>

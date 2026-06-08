@@ -1,0 +1,12 @@
+.env
+*/.env
+
+/.pnpm-store/
+
+**/obj/
+**/bin/
+
+**/.next/
+**/node_modules/
+
+**/.venv/
