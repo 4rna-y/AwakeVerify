@@ -393,6 +393,7 @@ drowsiness_scores
 
 以下は本仕様では未決定とする。
 
-- エンコード済みフレームの具体的な `codec`
 - Workerで使用する具体的なデコードライブラリ
 - Blob Storage上の映像フレーム保存期間・削除方針
+
+現行実装でバックエンドへ送信される `codec` は `image/jpeg` とする。

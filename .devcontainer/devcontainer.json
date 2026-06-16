@@ -7,7 +7,7 @@
 
     "features": {
         "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
-            "moby" : false
+            "moby": false
         },
         "ghcr.io/devcontainers/features/git:1": {}
     },
@@ -42,26 +42,20 @@
         }
     },
     "forwardPorts": [
-        3000, 
-        5000, 
-        5001, 
-        5432, 
-        6379, 
-        10000, 
-        10001, 
-        10002, 
-        5672
+        3000, 5194, 7031, 5000, 5001, 5432, 6379, 10000, 10001, 10002, 5672
     ],
     "portsAttributes": {
-        "3000":  { "label": "Next.js" },
-        "5000":  { "label": "ASP.NET Core HTTP" },
-        "5001":  { "label": "ASP.NET Core HTTPS" },
-        "5432":  { "label": "PostgreSQL" },
-        "6379":  { "label": "Redis" },
+        "3000": { "label": "Next.js" },
+        "5194": { "label": "Awaver Backend HTTP" },
+        "7031": { "label": "Awaver Backend HTTPS" },
+        "5000": { "label": "ASP.NET Core HTTP" },
+        "5001": { "label": "ASP.NET Core HTTPS" },
+        "5432": { "label": "PostgreSQL" },
+        "6379": { "label": "Redis" },
         "10000": { "label": "Azurite (Blob)" },
         "10001": { "label": "Azurite (Queue)" },
         "10002": { "label": "Azurite (Table)" },
-        "5672":  { "label": "Service Bus AMQP" }
+        "5672": { "label": "Service Bus AMQP" }
     },
     "postCreateCommand": "bash /workspace/.devcontainer/post-create.sh",
     "remoteUser": "vscode"

@@ -10,3 +10,6 @@
 **/node_modules/
 
 **/.venv/
+**/__pycache__/
+
+src/backend/Awaver.Backend/data/

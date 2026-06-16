@@ -45,9 +45,9 @@ fi
 section "依存パッケージのインストール"
 
 # Python Worker
-if [ -f "/workspace/worker/requirements.txt" ]; then
+if [ -f "/workspace/src/worker/requirements.txt" ]; then
     ok "Python 依存パッケージをインストール中..."
-    cd /workspace/worker
+    cd /workspace/src/worker
     python3 -m venv .venv
     # shellcheck disable=SC1091
     source .venv/bin/activate
@@ -55,29 +55,29 @@ if [ -f "/workspace/worker/requirements.txt" ]; then
     ok "Python パッケージのインストール完了"
     cd /workspace
 else
-    warn "worker/requirements.txt が見つかりません（スキップ）"
+    warn "src/worker/requirements.txt が見つかりません（スキップ）"
 fi
 
 # Next.js Frontend
-if [ -f "/workspace/frontend/package.json" ]; then
+if [ -f "/workspace/src/frontend/package.json" ]; then
     ok "Node.js 依存パッケージをインストール中..."
-    cd /workspace/frontend
+    cd /workspace/src/frontend
     pnpm install --silent
     ok "pnpm install 完了"
     cd /workspace
 else
-    warn "frontend/package.json が見つかりません（スキップ）"
+    warn "src/frontend/package.json が見つかりません（スキップ）"
 fi
 
 # ASP.NET Core Backend
-if ls /workspace/backend/**/*.csproj 2>/dev/null | head -1 | grep -q csproj; then
+if ls /workspace/src/backend/**/*.csproj 2>/dev/null | head -1 | grep -q csproj; then
     ok ".NET パッケージをリストア中..."
-    cd /workspace/backend
+    cd /workspace/src/backend
     dotnet restore --verbosity quiet
     ok "dotnet restore 完了"
     cd /workspace
 else
-    warn "backend/*.csproj が見つかりません（スキップ）"
+    warn "src/backend/*.csproj が見つかりません（スキップ）"
 fi
 
 # ──────────────────────────────────────────────

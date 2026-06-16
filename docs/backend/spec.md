@@ -224,6 +224,22 @@ Pフレームの場合:
 
 `receivedAt` はバックエンド受信時刻として付与する。
 
+現行実装では、WebSocketメッセージを以下のJSONとして受信する。
+
+```json
+{
+  "sessionId": "uuid",
+  "sequenceNo": 1,
+  "frameType": "I",
+  "baseIFrameSequenceNo": 1,
+  "capturedAt": "2026-06-14T10:00:00.000Z",
+  "codec": "image/jpeg",
+  "payloadBase64": "..."
+}
+```
+
+`payloadBase64` をバックエンドでバイナリへ復元し、Blob本体として保存する。現行実装の `codec` は `image/jpeg` とする。
+
 ## 7. Blob Storage保存仕様
 
 ### 7.1 保存対象
@@ -458,6 +474,4 @@ response:
 以下は本仕様では未決定とする。
 
 - 教員・管理者ログイン後の具体的なセッション管理方式またはトークン方式
-- WebSocketメッセージ内でのメタデータとバイナリ本体の梱包方式
-- エンコード済みフレームの具体的な `codec`
 - Blob Storage上の映像フレーム保存期間・削除方針

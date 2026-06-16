@@ -82,7 +82,10 @@ Service Busでは `sessionId` をSession IDとして設定する。
 - Blob Storage上のフレームバイナリ
 - Service Bus上のBlob参照メッセージ
 
-## 9. 未決定事項
+## 9. 実装設計・未決定事項
 
-- Blob Storage上の映像フレーム保存期間・削除方針
-- エンコード済みフレームの具体的な `codec`
+- 現行実装の `codec` は `image/jpeg` とする。
+- WebSocket JSONの `payloadBase64` をバックエンドでバイナリへ復元し、Blob本体として保存する。
+- Azure Blob Storage設定がない開発環境では、同じBlobパス形式でローカルファイルへ保存する。
+- Azure Service Bus設定がない開発環境では、投入予定メッセージをログへ出力する。
+- Blob Storage上の映像フレーム保存期間・削除方針は未決定とする。
