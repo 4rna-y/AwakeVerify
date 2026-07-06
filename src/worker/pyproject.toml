@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "awake-verify-worker"
+version = "0.1.0"
+description = "Worker app, shared face tracking logic, and local GUI validation tool for AwakeVerify."
+requires-python = ">=3.12"
+dependencies = [
+    "azure-servicebus>=7.14.3",
+    "azure-storage-blob>=12.29.0",
+    "mediapipe>=0.10.35",
+    "opencv-contrib-python>=4.13.0.92",
+    "numpy>=2.4.6",
+    "psycopg[binary]>=3.3.4",
+    "redis>=8.0.0",
+]
+
+[project.scripts]
+worker-app = "app.main:main"
+worker-gui = "gui.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "gui*", "shared*"]
+exclude = ["tests*"]

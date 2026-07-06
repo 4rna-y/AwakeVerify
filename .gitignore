@@ -16,3 +16,5 @@
 src/backend/Awaver.Backend/data/
 
 src/worker/models/*.task
+
+/.claude/
