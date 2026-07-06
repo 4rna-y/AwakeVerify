@@ -389,11 +389,131 @@ drowsiness_scores
 - yaw_deg
 ```
 
-## 15. 未決定事項
+## 15. 実装ディレクトリ構成
+
+Worker実装は、以下の3領域に分ける。
+
+```text
+src/worker/
+  app/      # 本番Workerアプリケーション
+  shared/   # 本番WorkerとGUI検証アプリで共通利用する解析ロジック
+  gui/      # ローカルGUI検証アプリケーション
+```
+
+### 15.1 app
+
+`app` は本番Workerの外部I/Oと実行制御を担う。
+
+主な責務:
+
+- Service Busからのフレーム参照メッセージ受信
+- Blob Storageからのフレーム取得
+- I/Pフレームデコード
+- `shared` の顔解析・キャリブレーション・眠気スコア算出ロジック呼び出し
+- Redis / PostgreSQL / SignalRとの接続
+- 本番環境向け設定読み込み
+
+### 15.2 shared
+
+`shared` は本番WorkerとローカルGUI検証アプリの共通ロジックを担う。
+
+主な責務:
+
+- 顔検出・顔ランドマーク推定
+- EAR算出
+- Pitch / Yaw算出
+- キャリブレーション状態管理
+- `EAR_open` / `EAR_threshold` 算出
+- PERCLOSおよび眠気スコア算出
+- 眠気レベル判定
+- `shouldPause` 判定
+
+`shared` にはService Bus、Blob Storage、PostgreSQL、Redis、SignalR、GUI描画などの外部I/Oを置かない。
+
+### 15.3 gui
+
+`gui` はローカル上で起動するGUI検証アプリケーションを担う。
+
+主な責務:
+
+- Webカメラ映像取得
+- OpenCVなどによるローカルGUI表示
+- `shared` の解析ロジック呼び出し
+- 顔ランドマーク、目ランドマーク、EAR、Pitch、Yaw、PERCLOS、score、level、`shouldPause` の可視化
+- キャリブレーション開始/リセットなどの手動操作
+
+`gui` はローカル検証用であり、本番のService Bus、Blob Storage、PostgreSQL、Redis、SignalRには接続しない。
+
+詳細は `docs/worker/local-gui-and-shared-architecture.md` に定義する。
+
+## 16. Worker app 実行仕様
+
+`src/worker/app/main.py` は、Backendが保存・キュー投入したフレームを処理するWorker本体である。
+
+### 16.1 入力
+
+Azure構成では以下を使用する。
+
+- Service Bus queue: フレーム参照メッセージ
+- Blob Storage: `blobPath` のフレームバイナリ
+
+ローカル検証構成では、Service Bus設定がない場合にBackendのローカル保存先をポーリングする。
+
+```text
+data/blobs/sessions/{sessionId}/frames/{sequenceNo}_{frameType}.bin
+```
+
+ローカル保存ファイルにはキューメタデータが含まれないため、Workerはファイルパスから `sessionId`、`sequenceNo`、`frameType` を復元し、1秒ごとのIフレーム間隔から `baseIFrameSequenceNo` を推定する。
+
+### 16.2 処理
+
+1. フレーム参照とフレームバイナリを取得する。
+2. `FrameDecoder` で `image/jpeg` を画像フレームへ復元する。
+3. `FaceAnalyzer` でEAR、Pitch、Yawを算出する。
+4. セッションごとに `CalibrationTracker` を保持し、初回フレームから25フレームでキャリブレーションする。
+5. キャリブレーション成功後、`DrowsinessScorer` でPERCLOS、score、level、`shouldPause` を算出する。
+6. 顔未検出時は `tracking_status` を通知する。
+7. 眠気スコア算出時は `drowsiness_score` を通知する。
+
+### 16.3 出力
+
+本番通知経路はSignalRを一次仕様とする。
+
+現行の開発・検証実装では、`/test` ページと接続するため、Backendの検証用APIへ解析結果をpublishする。
+
+```http
+POST /api/sessions/{sessionId}/analysis-results
+```
+
+payloadは `13.1` / `13.2` と同じ `drowsiness_score` または `tracking_status` とする。
+
+### 16.4 設定
+
+| 設定 | 用途 | 既定値 |
+| --- | --- | --- |
+| `WORKER_MODEL_PATH` | MediaPipeモデルパス | `src/worker/models/face_landmarker.task` |
+| `WORKER_BACKEND_BASE_URL` | Backend publish先 | `http://localhost:5194` |
+| `WORKER_LOCAL_FRAME_ROOT` | ローカルフレーム保存root | `data/blobs` |
+| `WORKER_POLL_INTERVAL_SECONDS` | ローカルポーリング間隔 | `0.2` |
+| `WORKER_HEALTH_HOST` | health endpoint bind host | `0.0.0.0` |
+| `WORKER_HEALTH_PORT` | health endpoint port | `8000` |
+| `AZURE_SERVICE_BUS_CONNECTION_STRING` / `Azure__ServiceBus__ConnectionString` | Azure Service Bus接続 | 未設定時はローカルポーリング |
+| `AZURE_SERVICE_BUS_FRAME_QUEUE_NAME` / `Azure__ServiceBus__FrameQueueName` | フレームqueue名 | 未設定時はローカルポーリング |
+| `AZURE_BLOB_STORAGE_CONNECTION_STRING` / `Azure__BlobStorage__ConnectionString` | Azure Blob接続 | 未設定時はローカルポーリング |
+| `AZURE_BLOB_STORAGE_CONTAINER_NAME` / `Azure__BlobStorage__ContainerName` | Blob container名 | `frames` |
+
+health endpoint:
+
+```http
+GET /health
+```
+
+## 17. 未決定事項
 
 以下は本仕様では未決定とする。
 
 - Workerで使用する具体的なデコードライブラリ
 - Blob Storage上の映像フレーム保存期間・削除方針
+- MediaPipe Face LandmarkerモデルファイルをGit管理するか、READMEでダウンロード手順を示すか
 
 現行実装でバックエンドへ送信される `codec` は `image/jpeg` とする。

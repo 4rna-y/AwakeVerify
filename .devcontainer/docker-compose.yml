@@ -6,10 +6,20 @@ services:
         volumes:
             - ..:/workspace:cached
             - /var/run/docker.sock:/var/run/docker.sock
+            - /tmp/.X11-unix:/tmp/.X11-unix:rw
+        devices:
+            - /dev/video0:/dev/video0
+        group_add:
+            - "${HOST_VIDEO_GID:-video}"
         env_file:
             - .env
         environment:
             NEXT_PUBLIC_API_BASE_URL: http://localhost:5194
+            DISPLAY: ${DISPLAY:-:0}
+            QT_X11_NO_MITSHM: "1"
+            LIBGL_ALWAYS_SOFTWARE: "1"
+        extra_hosts:
+            - "host.docker.internal:host-gateway"
         ports:
             - "3000:3000"
             - "5194:5194"
@@ -84,6 +94,7 @@ services:
               --blobHost 0.0.0.0
               --queueHost 0.0.0.0
               --tableHost 0.0.0.0
+              --skipApiVersionCheck
               --loose
         ports:
             - "10000:10000"

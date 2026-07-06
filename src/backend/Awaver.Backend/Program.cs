@@ -64,6 +64,7 @@ else
 }
 
 builder.Services.AddSingleton<FramePipeline>();
+builder.Services.AddSingleton<AnalysisResultBroadcaster>();
 
 var app = builder.Build();
 

@@ -389,6 +389,50 @@ Workerが算出した眠気スコア、およびトラッキング状態をAzure
 }
 ```
 
+### 10.3 開発・検証用解析結果イベントストリーム
+
+`/test` ページでWorker推論パイプラインを検証するため、Backendは同一プロセス内の購読者へ解析結果を中継する検証用APIを提供する。
+
+購読:
+
+```http
+GET /api/sessions/{sessionId}/analysis-events
+```
+
+- Server-Sent Events (`text/event-stream`) として配信する。
+- `data:` には `drowsiness_score` または `tracking_status` のJSONをそのまま含める。
+- 本APIは開発・検証用途であり、本番の一次通知経路はSignalR配信仕様とする。
+
+WorkerからBackendへのpublish:
+
+```http
+POST /api/sessions/{sessionId}/analysis-results
+```
+
+request:
+
+```json
+{
+  "type": "drowsiness_score",
+  "sessionId": "uuid",
+  "scoredAt": "2026-06-14T10:00:00Z",
+  "score": 0.82,
+  "level": "danger",
+  "perclos": 0.61,
+  "ear": 0.18,
+  "pitchDeg": 12.4,
+  "yawDeg": 4.2,
+  "shouldPause": true
+}
+```
+
+処理:
+
+1. `sessionId` の存在を確認する。
+2. request body の `sessionId` がpathの `sessionId` と一致することを確認する。
+3. `type` が `drowsiness_score` または `tracking_status` であることを確認する。
+4. 同一 `sessionId` の `analysis-events` 購読者へ配信する。
+
 ## 11. ダッシュボード取得API
 
 ### 11.1 セッション一覧

@@ -11,11 +11,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     lsb-release \
     unzip \
     libgl1 \
+    libgl1-mesa-dri \
+    libgles2 \
+    libegl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender1 \
     libgomp1 \
+    libgtk-3-0 \
+    libxkbcommon-x11-0 \
+    libxcb-cursor0 \
+    libxcb-xinerama0 \
+    x11-apps \
+    xauth \
+    v4l-utils \
     build-essential \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
