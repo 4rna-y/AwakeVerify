@@ -42,12 +42,13 @@
         }
     },
     "forwardPorts": [
-        3000, 5194, 7031, 5000, 5001, 5432, 6379, 10000, 10001, 10002, 5672
+        3000, 5194, 7031, 8000, 5000, 5001, 5432, 6379, 10000, 10001, 10002, 5672
     ],
     "portsAttributes": {
         "3000": { "label": "Next.js" },
         "5194": { "label": "Awaver Backend HTTP" },
         "7031": { "label": "Awaver Backend HTTPS" },
+        "8000": { "label": "Awaver Worker Health" },
         "5000": { "label": "ASP.NET Core HTTP" },
         "5001": { "label": "ASP.NET Core HTTPS" },
         "5432": { "label": "PostgreSQL" },

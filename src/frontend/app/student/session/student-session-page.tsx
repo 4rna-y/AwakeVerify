@@ -9,6 +9,7 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import { PauseIcon, PlayIcon } from "lucide-react";
+import * as signalR from "@microsoft/signalr";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -39,15 +40,57 @@ type StudentScreenState =
     | "ws_connecting"
     | "streaming"
     | "paused"
+    | "ended"
     | "error";
 
 type ServiceCheckState = "idle" | "checking" | "ready" | "error";
+type AnalysisStreamState = "idle" | "connecting" | "connected" | "error";
+type DrowsinessLevel = "normal" | "caution" | "warning" | "danger";
+type AutoPauseState = "idle" | "paused" | "recoverable";
+type AutoPauseReason = "drowsiness" | "face_not_detected";
+type PlaybackEventType = "auto_pause" | "resume";
+
+type DrowsinessScoreEvent = {
+    type: "drowsiness_score";
+    sessionId: string;
+    scoredAt: string;
+    score: number;
+    level: DrowsinessLevel;
+    perclos: number;
+    ear: number;
+    pitchDeg: number;
+    yawDeg: number;
+    shouldPause: boolean;
+};
+
+type TrackingStatusEvent = {
+    type: "tracking_status";
+    sessionId: string;
+    detectedAt: string;
+    status: "face_not_detected";
+};
+
+type CalibrationStatusEvent = {
+    type: "calibration_status";
+    sessionId: string;
+    updatedAt: string;
+    status: "calibrating" | "succeeded" | "failed";
+    validFrames: number;
+    totalFrames: number;
+    targetFrames: number;
+    earOpen: number | null;
+    earThreshold: number | null;
+};
+
+type AnalysisEvent =
+    | DrowsinessScoreEvent
+    | TrackingStatusEvent
+    | CalibrationStatusEvent;
 
 const apiBaseUrl =
     process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:5194";
 const frameIntervalMs = 200;
 const framesPerIFrame = 5;
-const calibrationDurationMs = 5000;
 const fallbackLessonDurationSec = 300;
 const lessonVideoUrl =
     process.env.NEXT_PUBLIC_LESSON_VIDEO_URL ??
@@ -58,8 +101,11 @@ const backendHealthUrl =
 const workerHealthUrl =
     process.env.NEXT_PUBLIC_WORKER_HEALTH_URL ?? "http://localhost:8000/health";
 const serviceHealthCheckTimeoutMs = 3000;
+const playbackEventRequestTimeoutMs = 3000;
 const maxWebSocketConnectAttempts = 5;
 const webSocketBackoffBaseMs = 500;
+const autoPauseRewindSec = 5;
+const controlsInactivityTimeoutMs = 3000;
 
 export default function StudentSessionPage() {
     const router = useRouter();
@@ -67,7 +113,6 @@ export default function StudentSessionPage() {
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [screenState, setScreenState] = useState<StudentScreenState>("camera_permission_required");
     const [message, setMessage] = useState<string | null>(null);
-    const [sentFrames, setSentFrames] = useState(0);
     const [isLoadingOpen, setIsLoadingOpen] = useState(false);
     const [isCalibrationOpen, setIsCalibrationOpen] = useState(false);
     const [isCalibrationDone, setIsCalibrationDone] = useState(false);
@@ -84,12 +129,28 @@ export default function StudentSessionPage() {
     const [serviceCheckState, setServiceCheckState] =
         useState<ServiceCheckState>("idle");
     const [serviceCheckMessage, setServiceCheckMessage] = useState("");
+    const [resultStreamState, setResultStreamState] =
+        useState<AnalysisStreamState>("idle");
+    const [latestScore, setLatestScore] =
+        useState<DrowsinessScoreEvent | null>(null);
+    const [latestTracking, setLatestTracking] =
+        useState<TrackingStatusEvent | null>(null);
+    const [calibrationStatus, setCalibrationStatus] =
+        useState<CalibrationStatusEvent | null>(null);
+    const [autoPauseState, setAutoPauseState] =
+        useState<AutoPauseState>("idle");
+    const [autoPauseReason, setAutoPauseReason] =
+        useState<AutoPauseReason | null>(null);
+    const [areControlsVisible, setAreControlsVisible] = useState(true);
 
     const lessonVideoRef = useRef<HTMLVideoElement | null>(null);
-    const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
+    const cameraCaptureVideoRef = useRef<HTMLVideoElement | null>(null);
+    const calibrationPreviewVideoRef = useRef<HTMLVideoElement | null>(null);
+    const autoPausePreviewVideoRef = useRef<HTMLVideoElement | null>(null);
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const streamRef = useRef<MediaStream | null>(null);
     const socketRef = useRef<WebSocket | null>(null);
+    const resultConnectionRef = useRef<signalR.HubConnection | null>(null);
     const frameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
         null,
     );
@@ -102,13 +163,23 @@ export default function StudentSessionPage() {
     const webSocketRetryTimeoutRef = useRef<ReturnType<
         typeof setTimeout
     > | null>(null);
+    const controlsInactivityTimeoutRef = useRef<ReturnType<
+        typeof setTimeout
+    > | null>(null);
     const webSocketConnectionIdRef = useRef(0);
     const activeSessionIdRef = useRef<string | null>(null);
     const sequenceNoRef = useRef(1);
     const baseIFrameSequenceNoRef = useRef(1);
     const sendingRef = useRef(false);
     const isPlayingRef = useRef(false);
+    const isAnalysisActiveRef = useRef(false);
+    const autoPauseStateRef = useRef<AutoPauseState>("idle");
+    const autoPauseReasonRef = useRef<AutoPauseReason | null>(null);
+    const autoPauseEventSentRef = useRef(false);
+    const pendingResumePlaybackEventRef = useRef(false);
     const pendingPlaybackAfterSocketOpenRef = useRef(false);
+    const pendingAnalysisAfterSocketOpenRef = useRef(false);
+    const lessonVideoFileName = getLessonVideoFileName(lessonVideoUrl);
 
     useEffect(() => {
         return () => {
@@ -117,13 +188,71 @@ export default function StudentSessionPage() {
             stopCalibrationTimer();
             clearWebSocketRetryTimer();
             socketRef.current?.close();
+            void resultConnectionRef.current?.stop();
             streamRef.current?.getTracks().forEach((track) => track.stop());
         };
     }, []);
 
-    const setCameraVideoElement = useCallback(
+    useEffect(() => {
+        function clearControlsInactivityTimer() {
+            if (controlsInactivityTimeoutRef.current) {
+                clearTimeout(controlsInactivityTimeoutRef.current);
+                controlsInactivityTimeoutRef.current = null;
+            }
+        }
+
+        function scheduleControlsAutoHide() {
+            clearControlsInactivityTimer();
+            controlsInactivityTimeoutRef.current = setTimeout(() => {
+                setAreControlsVisible(false);
+            }, controlsInactivityTimeoutMs);
+        }
+
+        function handleUserActivity() {
+            setAreControlsVisible(true);
+            scheduleControlsAutoHide();
+        }
+
+        handleUserActivity();
+        window.addEventListener("pointermove", handleUserActivity);
+        window.addEventListener("pointerdown", handleUserActivity);
+        window.addEventListener("keydown", handleUserActivity);
+        window.addEventListener("touchstart", handleUserActivity);
+
+        return () => {
+            clearControlsInactivityTimer();
+            window.removeEventListener("pointermove", handleUserActivity);
+            window.removeEventListener("pointerdown", handleUserActivity);
+            window.removeEventListener("keydown", handleUserActivity);
+            window.removeEventListener("touchstart", handleUserActivity);
+        };
+    }, []);
+
+    const setCameraCaptureVideoElement = useCallback(
         (element: HTMLVideoElement | null) => {
-            cameraVideoRef.current = element;
+            cameraCaptureVideoRef.current = element;
+
+            if (element && streamRef.current) {
+                attachStreamToVideo(element, streamRef.current);
+            }
+        },
+        [],
+    );
+
+    const setCalibrationPreviewVideoElement = useCallback(
+        (element: HTMLVideoElement | null) => {
+            calibrationPreviewVideoRef.current = element;
+
+            if (element && streamRef.current) {
+                attachStreamToVideo(element, streamRef.current);
+            }
+        },
+        [],
+    );
+
+    const setAutoPausePreviewVideoElement = useCallback(
+        (element: HTMLVideoElement | null) => {
+            autoPausePreviewVideoRef.current = element;
 
             if (element && streamRef.current) {
                 attachStreamToVideo(element, streamRef.current);
@@ -134,7 +263,7 @@ export default function StudentSessionPage() {
 
     useEffect(() => {
         if (isCalibrationOpen) {
-            attachStreamToCameraVideo();
+            attachStreamToCameraVideos();
         }
     }, [isCalibrationOpen]);
 
@@ -190,6 +319,7 @@ export default function StudentSessionPage() {
                 }
 
                 setIsLoadingOpen(false);
+                connectResultStream(storedSession.sessionId);
                 setIsCalibrationOpen(true);
                 setScreenState("calibration_ready");
                 connectFrameSocketWithRetry(
@@ -246,18 +376,31 @@ export default function StudentSessionPage() {
     function attachCameraStream(stream: MediaStream) {
         streamRef.current?.getTracks().forEach((track) => track.stop());
         streamRef.current = stream;
-        attachStreamToCameraVideo();
+        attachStreamToCameraVideos();
     }
 
-    function attachStreamToCameraVideo() {
-        const video = cameraVideoRef.current;
+    function attachStreamToCameraVideos() {
         const stream = streamRef.current;
 
-        if (!video || !stream) {
+        if (!stream) {
             return;
         }
 
-        attachStreamToVideo(video, stream);
+        const captureVideo = cameraCaptureVideoRef.current;
+        const calibrationPreviewVideo = calibrationPreviewVideoRef.current;
+        const autoPausePreviewVideo = autoPausePreviewVideoRef.current;
+
+        if (captureVideo) {
+            attachStreamToVideo(captureVideo, stream);
+        }
+
+        if (calibrationPreviewVideo) {
+            attachStreamToVideo(calibrationPreviewVideo, stream);
+        }
+
+        if (autoPausePreviewVideo) {
+            attachStreamToVideo(autoPausePreviewVideo, stream);
+        }
     }
 
     async function retryLoadingServiceCheck() {
@@ -286,29 +429,229 @@ export default function StudentSessionPage() {
         }
 
         setIsLoadingOpen(false);
+        connectResultStream(activeSessionId);
         setIsCalibrationOpen(true);
         setScreenState("calibration_ready");
         connectFrameSocketWithRetry(activeSessionId, stream, false);
     }
 
+    function connectResultStream(activeSessionId: string) {
+        void resultConnectionRef.current?.stop();
+        setResultStreamState("connecting");
+
+        const connection = new signalR.HubConnectionBuilder()
+            .withUrl(buildAnalysisEventsHubUrl())
+            .withAutomaticReconnect()
+            .build();
+        resultConnectionRef.current = connection;
+
+        connection.on("ReceiveAnalysisEvent", (payload: unknown) => {
+            const analysisEvent = parseAnalysisEvent(payload);
+            if (!analysisEvent || analysisEvent.sessionId !== activeSessionId) {
+                return;
+            }
+
+            handleAnalysisEvent(analysisEvent);
+        });
+
+        connection.onreconnecting(() => {
+            setResultStreamState("connecting");
+        });
+
+        connection.onreconnected(() => {
+            void connection
+                .invoke("JoinSession", activeSessionId)
+                .then(() => setResultStreamState("connected"))
+                .catch(() => setResultStreamState("error"));
+        });
+
+        connection.onclose(() => {
+            setResultStreamState("error");
+            if (screenState === "calibrating" || screenState === "streaming") {
+                setMessage(
+                    "解析結果イベントストリームでエラーが発生しました。Backend の起動状態を確認してください。",
+                );
+            }
+        });
+
+        connection
+            .start()
+            .then(() => connection.invoke("JoinSession", activeSessionId))
+            .then(() => {
+                setResultStreamState("connected");
+            })
+            .catch(() => {
+                setResultStreamState("error");
+                setMessage(
+                    "解析結果イベントストリームへの接続に失敗しました。Backend の起動状態を確認してください。",
+                );
+            });
+    }
+
+    function handleAnalysisEvent(analysisEvent: AnalysisEvent) {
+        if (analysisEvent.type === "calibration_status") {
+            handleCalibrationStatus(analysisEvent);
+            return;
+        }
+
+        if (analysisEvent.type === "drowsiness_score") {
+            handleDrowsinessScore(analysisEvent);
+            return;
+        }
+
+        handleTrackingStatus(analysisEvent);
+    }
+
+    function handleTrackingStatus(event: TrackingStatusEvent) {
+        setLatestTracking(event);
+
+        if (event.status !== "face_not_detected") {
+            return;
+        }
+
+        if (isPlayingRef.current) {
+            autoPausePlayback("face_not_detected");
+            return;
+        }
+
+        if (autoPauseStateRef.current === "recoverable") {
+            showAutoPauseBlockedMessage("face_not_detected");
+        }
+    }
+
+    function handleCalibrationStatus(event: CalibrationStatusEvent) {
+        setCalibrationStatus(event);
+        setCalibrationProgress(
+            event.targetFrames > 0
+                ? Math.min((event.totalFrames / event.targetFrames) * 100, 100)
+                : 0,
+        );
+
+        if (event.status === "succeeded") {
+            completeCalibration();
+            return;
+        }
+
+        if (event.status === "failed") {
+            stopFrameSending();
+            setScreenState("calibration_ready");
+            setMessage(
+                "キャリブレーションに失敗しました。顔が正面から映るようにカメラ位置を調整してください。",
+            );
+        }
+    }
+
+    function handleDrowsinessScore(event: DrowsinessScoreEvent) {
+        setLatestScore(event);
+        setLatestTracking(null);
+
+        if (shouldAutoPause(event)) {
+            if (isPlayingRef.current) {
+                autoPausePlayback("drowsiness");
+                return;
+            }
+
+            if (autoPauseStateRef.current === "recoverable") {
+                showAutoPauseBlockedMessage("drowsiness");
+            }
+            return;
+        }
+
+        if (autoPauseStateRef.current === "paused" && event.level === "normal") {
+            const pauseReason = autoPauseReasonRef.current;
+            autoPauseStateRef.current = "recoverable";
+            setAutoPauseState("recoverable");
+            setLatestTracking(null);
+            setMessage(
+                pauseReason === "face_not_detected"
+                    ? "あなたのお顔がよくみえます！再生ボタンを押すと動画が再開します。"
+                    : "起きていることが確認できました。再生ボタンを押すと再開します。",
+            );
+        }
+    }
+
+    function autoPausePlayback(reason: AutoPauseReason) {
+        const lessonVideo = lessonVideoRef.current;
+        const pauseVideoTimeSec = lessonVideo
+            ? getCurrentVideoTime(lessonVideo)
+            : playbackPosition;
+
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+        setScreenState("paused");
+
+        if (lessonVideo) {
+            lessonVideo.pause();
+            setPlaybackPosition(Math.floor(rewindLessonVideo(lessonVideo)));
+        }
+
+        stopPlaybackTimer();
+        showAutoPauseBlockedMessage(reason);
+
+        if (!autoPauseEventSentRef.current) {
+            autoPauseEventSentRef.current = true;
+            void sendPlaybackEvent(
+                activeSessionIdRef.current,
+                "auto_pause",
+                pauseVideoTimeSec,
+            );
+        }
+    }
+
+    function rewindLessonVideo(video: HTMLVideoElement) {
+        const currentTime = Number.isFinite(video.currentTime)
+            ? video.currentTime
+            : 0;
+        const rewoundTime = Math.max(0, currentTime - autoPauseRewindSec);
+        video.currentTime = rewoundTime;
+        return rewoundTime;
+    }
+
+    function showAutoPauseBlockedMessage(reason: AutoPauseReason) {
+        autoPauseStateRef.current = "paused";
+        autoPauseReasonRef.current = reason;
+        setAutoPauseState("paused");
+        setAutoPauseReason(reason);
+        setMessage(
+            reason === "face_not_detected"
+                ? "顔が検出できません。カメラの状態を確認し、顔と目がしっかり映っているか確認してください！"
+                : "眠っていますか？目が閉じているため、動画を一時停止しています。",
+        );
+    }
+
     function startCalibration() {
+        const activeSessionId = activeSessionIdRef.current;
+        const stream = streamRef.current;
+
+        if (!activeSessionId || !stream) {
+            setScreenState("error");
+            setMessage(
+                "受講セッションまたはカメラ映像が初期化されていません。",
+            );
+            return;
+        }
+
+        if (resultStreamState !== "connected") {
+            setMessage(
+                "解析結果イベントストリームへの接続完了後にキャリブレーションを開始してください。",
+            );
+            return;
+        }
+
         stopCalibrationTimer();
         setCalibrationProgress(0);
+        setCalibrationStatus(null);
+        setLatestTracking(null);
+        setMessage(null);
         setScreenState("calibrating");
 
-        const startedAt = Date.now();
-        calibrationIntervalRef.current = setInterval(() => {
-            const elapsed = Date.now() - startedAt;
-            const progress = Math.min(
-                (elapsed / calibrationDurationMs) * 100,
-                100,
-            );
-            setCalibrationProgress(progress);
+        if (socketRef.current?.readyState === WebSocket.OPEN) {
+            startFrameSending(activeSessionId, stream);
+            return;
+        }
 
-            if (progress >= 100) {
-                completeCalibration();
-            }
-        }, 100);
+        pendingAnalysisAfterSocketOpenRef.current = true;
+        connectFrameSocketWithRetry(activeSessionId, stream, false);
     }
 
     function completeCalibration() {
@@ -328,7 +671,33 @@ export default function StudentSessionPage() {
     }
 
     function startPlayback() {
-        if (!sessionId || !streamRef.current) {
+        if (screenState === "ended") {
+            return;
+        }
+
+        if (autoPauseStateRef.current === "paused") {
+            setMessage(
+                autoPauseReasonRef.current === "face_not_detected"
+                    ? "顔が検出できるまで動画を再開できません。"
+                    : "眠気レベルが normal に戻るまで動画を再開できません。",
+            );
+            return;
+        }
+
+        const shouldSendResumeEvent = autoPauseStateRef.current === "recoverable";
+
+        if (shouldSendResumeEvent) {
+            autoPauseStateRef.current = "idle";
+            autoPauseReasonRef.current = null;
+            setAutoPauseState("idle");
+            setAutoPauseReason(null);
+            setMessage(null);
+        }
+
+        const activeSessionId = activeSessionIdRef.current;
+        const stream = streamRef.current;
+
+        if (!activeSessionId || !stream) {
             setScreenState("error");
             setMessage(
                 "受講セッションまたはカメラ映像が初期化されていません。",
@@ -336,12 +705,15 @@ export default function StudentSessionPage() {
             return;
         }
 
+        pendingResumePlaybackEventRef.current =
+            pendingResumePlaybackEventRef.current || shouldSendResumeEvent;
+
         if (socketRef.current?.readyState === WebSocket.OPEN) {
-            beginPlaybackAfterSocketOpen(sessionId, streamRef.current);
+            beginPlaybackAfterSocketOpen(activeSessionId, stream);
             return;
         }
 
-        connectFrameSocketWithRetry(sessionId, streamRef.current, true);
+        connectFrameSocketWithRetry(activeSessionId, stream, true);
     }
 
     function beginPlaybackAfterSocketOpen(
@@ -355,12 +727,25 @@ export default function StudentSessionPage() {
             safelyPlayVideo(lessonVideoRef.current);
         }
         startPlaybackTimer();
-        startFrameSending(activeSessionId, stream);
+        ensureFrameSending(activeSessionId, stream);
+
+        if (pendingResumePlaybackEventRef.current) {
+            pendingResumePlaybackEventRef.current = false;
+            autoPauseEventSentRef.current = false;
+            void sendPlaybackEvent(
+                activeSessionId,
+                "resume",
+                lessonVideoRef.current
+                    ? getCurrentVideoTime(lessonVideoRef.current)
+                    : playbackPosition,
+            );
+        }
     }
 
     function pausePlayback() {
         webSocketConnectionIdRef.current += 1;
         pendingPlaybackAfterSocketOpenRef.current = false;
+        pendingAnalysisAfterSocketOpenRef.current = false;
         clearWebSocketRetryTimer();
         setIsWebSocketConnecting(false);
         isPlayingRef.current = false;
@@ -390,15 +775,19 @@ export default function StudentSessionPage() {
                     ? Math.floor(video.currentTime)
                     : current + 1;
 
-                if (nextPosition >= duration) {
+                const hasEnded = video ? video.ended : nextPosition >= duration;
+
+                if (hasEnded) {
                     stopPlaybackTimer();
                     stopFrameSending();
                     isPlayingRef.current = false;
                     setIsPlaying(false);
-                    setScreenState("ready");
+                    video?.pause();
+                    setMessage("おつかれさまでした。動画教材の受講が完了しました。");
+                    setScreenState("ended");
                     return duration;
                 }
-                return nextPosition;
+                return Math.min(nextPosition, duration);
             });
         }, 1000);
     }
@@ -419,7 +808,8 @@ export default function StudentSessionPage() {
         isPlayingRef.current = false;
         setIsPlaying(false);
         setPlaybackPosition(lessonDurationSec);
-        setScreenState("ready");
+        setMessage("おつかれさまでした。動画教材の受講が完了しました。");
+        setScreenState("ended");
     }
 
     function stopPlaybackTimer() {
@@ -438,6 +828,10 @@ export default function StudentSessionPage() {
 
         if (socketRef.current?.readyState === WebSocket.OPEN) {
             setIsWebSocketConnected(true);
+            if (pendingAnalysisAfterSocketOpenRef.current) {
+                pendingAnalysisAfterSocketOpenRef.current = false;
+                startFrameSending(activeSessionId, stream);
+            }
             if (startPlaybackOnOpen) {
                 beginPlaybackAfterSocketOpen(activeSessionId, stream);
             }
@@ -497,6 +891,11 @@ export default function StudentSessionPage() {
             setIsWebSocketConnected(true);
             setWebSocketConnectAttempt(0);
 
+            if (pendingAnalysisAfterSocketOpenRef.current) {
+                pendingAnalysisAfterSocketOpenRef.current = false;
+                startFrameSending(activeSessionId, stream);
+            }
+
             if (pendingPlaybackAfterSocketOpenRef.current) {
                 pendingPlaybackAfterSocketOpenRef.current = false;
                 beginPlaybackAfterSocketOpen(activeSessionId, stream);
@@ -539,6 +938,7 @@ export default function StudentSessionPage() {
             setIsPlaying(false);
             stopPlaybackTimer();
             stopFrameSending();
+            pendingAnalysisAfterSocketOpenRef.current = false;
             setScreenState("error");
             setMessage(
                 "WebSocket 接続に失敗しました。ネットワークまたはバックエンドの起動状態を確認してください。",
@@ -574,8 +974,18 @@ export default function StudentSessionPage() {
         return baseUrl.toString();
     }
 
+    function ensureFrameSending(activeSessionId: string, stream: MediaStream) {
+        isAnalysisActiveRef.current = true;
+        if (frameIntervalRef.current) {
+            return;
+        }
+
+        startFrameSending(activeSessionId, stream);
+    }
+
     function startFrameSending(activeSessionId: string, stream: MediaStream) {
         stopFrameSending();
+        isAnalysisActiveRef.current = true;
 
         const videoTrack = stream.getVideoTracks()[0];
         const settings = videoTrack?.getSettings();
@@ -589,7 +999,6 @@ export default function StudentSessionPage() {
 
         sequenceNoRef.current = 1;
         baseIFrameSequenceNoRef.current = 1;
-        setSentFrames(0);
 
         frameIntervalRef.current = setInterval(() => {
             void captureAndSendFrame(activeSessionId, canvas);
@@ -597,6 +1006,7 @@ export default function StudentSessionPage() {
     }
 
     function stopFrameSending() {
+        isAnalysisActiveRef.current = false;
         if (frameIntervalRef.current) {
             clearInterval(frameIntervalRef.current);
             frameIntervalRef.current = null;
@@ -608,11 +1018,11 @@ export default function StudentSessionPage() {
         canvas: HTMLCanvasElement,
     ) {
         const socket = socketRef.current;
-        const video = cameraVideoRef.current;
+        const video = cameraCaptureVideoRef.current;
 
         if (
             sendingRef.current ||
-            !isPlayingRef.current ||
+            !isAnalysisActiveRef.current ||
             !socket ||
             socket.readyState !== WebSocket.OPEN ||
             !video ||
@@ -650,7 +1060,14 @@ export default function StudentSessionPage() {
             );
 
             sequenceNoRef.current = sequenceNo + 1;
-            setSentFrames((current) => current + 1);
+        } catch (error) {
+            setScreenState("error");
+            setMessage(
+                error instanceof Error
+                    ? error.message
+                    : "フレーム送信中にエラーが発生しました。",
+            );
+            stopFrameSending();
         } finally {
             sendingRef.current = false;
         }
@@ -696,8 +1113,11 @@ export default function StudentSessionPage() {
         });
     }
 
-    const hasError =
-        screenState === "error" || screenState === "camera_permission_required";
+    const isCameraSending =
+        isPlaying || screenState === "calibrating" || autoPauseState !== "idle";
+    const controlsVisibilityClass = areControlsVisible
+        ? "opacity-100"
+        : "pointer-events-none opacity-0";
 
     return (
         <main className="relative h-screen w-screen overflow-hidden">
@@ -710,17 +1130,40 @@ export default function StudentSessionPage() {
                 onLoadedMetadata={handleLessonMetadataLoaded}
                 onEnded={handleLessonEnded}
             />
+            <video
+                ref={setCameraCaptureVideoElement}
+                className="pointer-events-none absolute h-px w-px opacity-0"
+                muted
+                playsInline
+            />
 
-            <div className="absolute top-4 right-4 flex gap-2">
-                {studentId && <Badge variant="secondary">{studentId}</Badge>}
-                <Badge>{isPlaying ? "カメラ録画中" : "カメラ待機中"}</Badge>
-                <Badge variant="secondary">送信 {sentFrames}</Badge>
-                <Badge variant="secondary">
-                    WS{isWebSocketConnected ? "接続済み" : "未接続"}
-                </Badge>
-            </div>
+            <header
+                className={`absolute top-0 right-0 left-0 z-10 flex items-center justify-between gap-4 bg-black/60 px-6 py-3 text-white transition-opacity duration-150 ${controlsVisibilityClass}`}
+            >
+                <span className="min-w-0 truncate font-medium">
+                    {lessonVideoFileName}
+                </span>
+                <div className="group/badges flex shrink-0 gap-2">
+                    {studentId && <Badge variant="secondary">{studentId}</Badge>}
+                    <Badge>{isCameraSending ? "カメラ送信中" : "カメラ待機中"}</Badge>
+                    {latestScore && (
+                        <Badge
+                            className="hidden group-hover/badges:inline-flex group-focus-within/badges:inline-flex"
+                            variant={
+                                shouldAutoPause(latestScore)
+                                    ? "destructive"
+                                    : "secondary"
+                            }
+                        >
+                            score {latestScore.score.toFixed(2)} / {latestScore.level}
+                        </Badge>
+                    )}
+                </div>
+            </header>
 
-            <div className="absolute right-6 bottom-6 left-6 flex flex-col gap-3">
+            <footer
+                className={`absolute right-0 bottom-0 left-0 z-10 flex flex-col gap-3 bg-black/60 px-6 py-4 text-white transition-opacity duration-150 ${controlsVisibilityClass}`}
+            >
                 <div className="flex items-center gap-3">
                     <Button
                         type="button"
@@ -731,6 +1174,9 @@ export default function StudentSessionPage() {
                             isCalibrationOpen ||
                             !sessionId ||
                             isWebSocketConnecting ||
+                            !isCalibrationDone ||
+                            autoPauseState === "paused" ||
+                            screenState === "ended" ||
                             screenState === "error" ||
                             screenState === "camera_permission_required"
                         }
@@ -753,21 +1199,51 @@ export default function StudentSessionPage() {
                         {formatTime(lessonDurationSec)}
                     </span>
                 </div>
-            </div>
+            </footer>
 
-            {message && hasError && (
-                <div className="absolute top-16 left-1/2 w-full max-w-md -translate-x-1/2 px-4">
+            {message && (
+                <div className="absolute top-20 left-1/2 w-full max-w-md -translate-x-1/2 px-4">
                     <Alert
                         variant={
                             screenState === "error" ? "destructive" : "default"
                         }
                     >
                         <AlertTitle>
-                            {screenState === "error" ? "確認してください" : "状態"}
+                            {screenState === "ended"
+                                ? "受講が完了しました"
+                                : screenState === "error"
+                                  ? "確認してください"
+                                  : autoPauseState === "paused" &&
+                                    autoPauseReason === "face_not_detected"
+                                  ? "そこにいる？"
+                                  : autoPauseState === "paused"
+                                    ? "おきて！"
+                                    : autoPauseState === "recoverable" &&
+                                        autoPauseReason === "face_not_detected"
+                                      ? "おかえり！"
+                                      : autoPauseState === "recoverable"
+                                        ? "おはよう！"
+                                        : "状態"}
                         </AlertTitle>
                         <AlertDescription className="flex flex-col gap-3">
                             <span>{message}</span>
-                            {screenState === "error" && (
+                            {autoPauseState === "paused" &&
+                                autoPauseReason === "drowsiness" &&
+                                latestScore && (
+                                    <span>
+                                        {latestScore.score.toFixed(2)} / 1.0
+                                    </span>
+                                )}
+                            {autoPauseState === "paused" &&
+                                autoPauseReason === "face_not_detected" && (
+                                    <video
+                                        ref={setAutoPausePreviewVideoElement}
+                                        className="aspect-4/3 w-full object-cover"
+                                        muted
+                                        playsInline
+                                    />
+                                )}
+                            {(screenState === "error" || screenState === "ended") && (
                                 <Button
                                     type="button"
                                     variant="outline"
@@ -776,6 +1252,17 @@ export default function StudentSessionPage() {
                                     ログインページへ戻る
                                 </Button>
                             )}
+                        </AlertDescription>
+                    </Alert>
+                </div>
+            )}
+
+            {latestTracking && !message && autoPauseState === "idle" && (
+                <div className="absolute top-20 left-1/2 w-full max-w-md -translate-x-1/2 px-4">
+                    <Alert>
+                        <AlertTitle>顔検出</AlertTitle>
+                        <AlertDescription>
+                            顔が検出できません。カメラ位置を調整してください。
                         </AlertDescription>
                     </Alert>
                 </div>
@@ -893,27 +1380,49 @@ export default function StudentSessionPage() {
 
                     <div className="flex flex-col gap-4">
                         <video
-                            ref={setCameraVideoElement}
+                            ref={setCalibrationPreviewVideoElement}
                             className="aspect-4/3 w-full object-cover"
                             muted
                             playsInline
                         />
+                        <div className="grid gap-2 text-sm md:grid-cols-2">
+                            <span className="text-muted-foreground">
+                                WebSocket: {isWebSocketConnected ? "接続済み" : "接続中"}
+                            </span>
+                            <span className="text-muted-foreground">
+                                解析イベント: {resultStreamState}
+                            </span>
+                        </div>
                         {screenState === "calibrating" && (
                             <>
                                 <Progress value={calibrationProgress} />
-                                <div className="flex justify-end">
-                                    <span className="text-sm text-muted-foreground">
-                                        {Math.round(calibrationProgress)}%
+                                <div className="flex justify-between text-sm text-muted-foreground">
+                                    <span>
+                                        {calibrationStatus
+                                            ? `${calibrationStatus.validFrames}/${calibrationStatus.totalFrames} frames`
+                                            : "Worker 解析待ち"}
                                     </span>
+                                    <span>{Math.round(calibrationProgress)}%</span>
                                 </div>
                             </>
+                        )}
+                        {calibrationStatus?.status === "failed" && (
+                            <Alert variant="destructive">
+                                <AlertTitle>キャリブレーション失敗</AlertTitle>
+                                <AlertDescription>
+                                    顔が正面から映るようにカメラ位置を調整して、もう一度開始してください。
+                                </AlertDescription>
+                            </Alert>
                         )}
                     </div>
 
                     <DialogFooter>
                         <Button
                             onClick={startCalibration}
-                            disabled={screenState === "calibrating"}
+                            disabled={
+                                screenState === "calibrating" ||
+                                resultStreamState !== "connected"
+                            }
                         >
                             {screenState === "calibrating"
                                 ? "キャリブレーション中..."
@@ -976,6 +1485,61 @@ function getLessonDuration(
     }
 
     return Math.floor(video.duration);
+}
+
+function getCurrentVideoTime(video: HTMLVideoElement) {
+    return Number.isFinite(video.currentTime) ? video.currentTime : 0;
+}
+
+async function sendPlaybackEvent(
+    sessionId: string | null,
+    type: PlaybackEventType,
+    videoTimeSec: number,
+) {
+    if (!sessionId) {
+        console.warn("再生イベントを送信できませんでした。sessionId がありません。", {
+            type,
+            videoTimeSec,
+        });
+        return;
+    }
+
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(
+        () => abortController.abort(),
+        playbackEventRequestTimeoutMs,
+    );
+
+    try {
+        const response = await fetch(buildPlaybackEventsUrl(sessionId), {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                type,
+                occurredAt: new Date().toISOString(),
+                videoTimeSec,
+            }),
+            signal: abortController.signal,
+        });
+
+        if (!response.ok) {
+            console.warn("再生イベントの送信に失敗しました。", {
+                type,
+                videoTimeSec,
+                status: response.status,
+            });
+        }
+    } catch (error) {
+        console.warn("再生イベントの送信に失敗しました。", {
+            type,
+            videoTimeSec,
+            error,
+        });
+    } finally {
+        clearTimeout(timeoutId);
+    }
 }
 
 async function checkCalibrationServices() {
@@ -1044,6 +1608,62 @@ function buildBackendHealthUrl(baseUrl: string) {
     url.pathname = "/WeatherForecast";
     url.search = "";
     return url.toString();
+}
+
+function buildAnalysisEventsHubUrl() {
+    const url = new URL(apiBaseUrl);
+    url.pathname = "/hubs/analysis-events";
+    url.search = "";
+    return url.toString();
+}
+
+function buildPlaybackEventsUrl(sessionId: string) {
+    const url = new URL(apiBaseUrl);
+    url.pathname = `/api/sessions/${sessionId}/playback-events`;
+    url.search = "";
+    return url.toString();
+}
+
+function parseAnalysisEvent(value: unknown): AnalysisEvent | null {
+    if (typeof value !== "object" || value === null) {
+        return null;
+    }
+
+    const parsed = value as Partial<AnalysisEvent>;
+    if (
+        parsed.type === "drowsiness_score" &&
+        typeof parsed.sessionId === "string"
+    ) {
+        return parsed as DrowsinessScoreEvent;
+    }
+    if (
+        parsed.type === "tracking_status" &&
+        typeof parsed.sessionId === "string"
+    ) {
+        return parsed as TrackingStatusEvent;
+    }
+    if (
+        parsed.type === "calibration_status" &&
+        typeof parsed.sessionId === "string"
+    ) {
+        return parsed as CalibrationStatusEvent;
+    }
+    return null;
+}
+
+function shouldAutoPause(score: DrowsinessScoreEvent) {
+    return score.shouldPause || score.level === "danger" || score.score >= 0.75;
+}
+
+function getLessonVideoFileName(videoUrl: string) {
+    try {
+        const pathname = new URL(videoUrl).pathname;
+        const fileName = pathname.split("/").filter(Boolean).at(-1);
+        return fileName ? decodeURIComponent(fileName) : "動画教材";
+    } catch {
+        const fileName = videoUrl.split("/").filter(Boolean).at(-1);
+        return fileName || "動画教材";
+    }
 }
 
 function formatTime(seconds: number) {

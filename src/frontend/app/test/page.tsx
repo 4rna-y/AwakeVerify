@@ -53,7 +53,24 @@ type TrackingStatusEvent = {
     status: "face_not_detected";
 };
 
-type AnalysisEvent = DrowsinessScoreEvent | TrackingStatusEvent;
+type CalibrationStatus = "calibrating" | "succeeded" | "failed";
+
+type CalibrationStatusEvent = {
+    type: "calibration_status";
+    sessionId: string;
+    updatedAt: string;
+    status: CalibrationStatus;
+    validFrames: number;
+    totalFrames: number;
+    targetFrames: number;
+    earOpen: number | null;
+    earThreshold: number | null;
+};
+
+type AnalysisEvent =
+    | DrowsinessScoreEvent
+    | TrackingStatusEvent
+    | CalibrationStatusEvent;
 
 export default function WorkerPipelineTestPage() {
     const [studentId, setStudentId] = useState(() => buildDefaultStudentId());
@@ -70,6 +87,8 @@ export default function WorkerPipelineTestPage() {
     );
     const [latestTracking, setLatestTracking] =
         useState<TrackingStatusEvent | null>(null);
+    const [calibration, setCalibration] =
+        useState<CalibrationStatusEvent | null>(null);
     const [recentEvents, setRecentEvents] = useState<AnalysisEvent[]>([]);
 
     const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -101,6 +120,7 @@ export default function WorkerPipelineTestPage() {
         setMessage(null);
         setLatestScore(null);
         setLatestTracking(null);
+        setCalibration(null);
         setRecentEvents([]);
         setSentFrames(0);
 
@@ -254,8 +274,10 @@ export default function WorkerPipelineTestPage() {
 
             if (analysisEvent.type === "drowsiness_score") {
                 setLatestScore(analysisEvent);
-            } else {
+            } else if (analysisEvent.type === "tracking_status") {
                 setLatestTracking(analysisEvent);
+            } else {
+                setCalibration(analysisEvent);
             }
 
             setRecentEvents((current) =>
@@ -367,6 +389,9 @@ export default function WorkerPipelineTestPage() {
                         <Badge variant="secondary">runtime: {runtimeState}</Badge>
                         <Badge variant="secondary">frame WS: {frameSocketState}</Badge>
                         <Badge variant="secondary">result: {resultStreamState}</Badge>
+                        <Badge variant={calibration?.status === "failed" ? "destructive" : "secondary"}>
+                            calibration: {calibration?.status ?? "pending"}
+                        </Badge>
                     </div>
                 </div>
 
@@ -449,6 +474,56 @@ export default function WorkerPipelineTestPage() {
                     </Card>
 
                     <div className="flex flex-col gap-6">
+                        <Card>
+                            <CardHeader>
+                                <CardTitle>Calibration</CardTitle>
+                                <CardDescription>
+                                    開眼状態を基準化し、個人別の閉眼閾値を算出します。
+                                </CardDescription>
+                            </CardHeader>
+                            <CardContent className="flex flex-col gap-3">
+                                {calibration?.status === "failed" && (
+                                    <Alert variant="destructive">
+                                        <AlertTitle>キャリブレーション失敗</AlertTitle>
+                                        <AlertDescription>
+                                            キャリブレーションに失敗しました。顔が正面から映るようにカメラ位置を調整してください。自動的に再試行します。
+                                        </AlertDescription>
+                                    </Alert>
+                                )}
+
+                                {calibration ? (
+                                    <>
+                                        {calibration.status === "calibrating" && (
+                                            <p className="text-sm text-muted-foreground">
+                                                顔を正面に向けてください。キャリブレーション中です。
+                                            </p>
+                                        )}
+                                        <Metric
+                                            label="valid/total frames"
+                                            value={`${calibration.validFrames} / ${calibration.totalFrames} (target ${calibration.targetFrames})`}
+                                        />
+                                        {calibration.status === "succeeded" && (
+                                            <>
+                                                <Metric
+                                                    label="EAR_open"
+                                                    value={calibration.earOpen?.toFixed(3) ?? "-"}
+                                                />
+                                                <Metric
+                                                    label="EAR_threshold"
+                                                    value={calibration.earThreshold?.toFixed(3) ?? "-"}
+                                                />
+                                            </>
+                                        )}
+                                        <Metric label="updatedAt" value={formatTime(calibration.updatedAt)} />
+                                    </>
+                                ) : (
+                                    <p className="text-sm text-muted-foreground">
+                                        パイプライン開始後、5秒間のキャリブレーションが自動的に実施されます。
+                                    </p>
+                                )}
+                            </CardContent>
+                        </Card>
+
                         <Card>
                             <CardHeader>
                                 <CardTitle>Latest worker result</CardTitle>
@@ -564,6 +639,9 @@ function parseAnalysisEvent(value: string): AnalysisEvent | null {
         }
         if (parsed.type === "tracking_status" && typeof parsed.sessionId === "string") {
             return parsed as TrackingStatusEvent;
+        }
+        if (parsed.type === "calibration_status" && typeof parsed.sessionId === "string") {
+            return parsed as CalibrationStatusEvent;
         }
         return null;
     } catch {

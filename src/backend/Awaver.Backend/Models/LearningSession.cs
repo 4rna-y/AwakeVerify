@@ -8,4 +8,5 @@ public sealed class LearningSession
     public DateTimeOffset? EndedAt { get; set; }
 
     public Student? Student { get; init; }
+    public ICollection<PlaybackEvent> PlaybackEvents { get; } = new List<PlaybackEvent>();
 }

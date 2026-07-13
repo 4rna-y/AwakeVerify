@@ -20,7 +20,7 @@
 
 - 受講者は `/` または `/student` にアクセスできる。
 - Webカメラが利用可能である。
-- バックエンド、Worker、Blob Storage、Service Bus、Redis、PostgreSQL、SignalRが利用可能である。
+- バックエンド、Worker、Blob Storage、Service Bus、Redis、PostgreSQLが利用可能である。SignalRは最終仕様の通知基盤であり、現行ローカル開発・暫定実装では [`09-realtime-notification.md`](../features/09-realtime-notification.md) に従いSSEで代替する。
 - 動画教材がAzure Blob Storage上の配信用URLから取得できる。ローカル開発ではAzuriteのBlob URLで代替する。
 - 受講者の顔がWebカメラに正面から映る。
 
@@ -51,30 +51,31 @@
 11. フロントエンドがWebカメラ映像を取得する。
 12. フロントエンドがAzure Blob StorageまたはローカルAzuriteのBlob URLを動画教材URLとして読み込む。
 13. フロントエンドが画面全面の動画Frameを表示する。
-14. フロントエンドが動画再生画面で `/ws/sessions/{sessionId}/frames` へ接続する。
-15. フロントエンドが動画Frame上にキャリブレーションモーダルを表示し、カメラ画角を表示する。
-16. 受講者が開始ボタンを押す。
-17. フロントエンドがBackendとWorkerの起動状態を確認する。
-18. BackendとWorkerの起動確認に成功した場合のみ、フロントエンドが5秒間のキャリブレーション指示と進捗を表示する。
-19. キャリブレーション終了後、フロントエンドがモーダルを閉じる。
-20. WebSocket接続済みの場合は動画再生とカメラ画角画像の送信を開始し、接続中の場合は接続完了後に開始する。
-21. フロントエンドがI/Pフレームを1フレームずつWebSocketで送信する。
-22. バックエンドが受信フレームに `receivedAt` を付与する。
-23. バックエンドがフレームをBlob Storageへ保存する。
-24. バックエンドがBlob参照情報をService Busへ投入する。
-25. WorkerがService BusからBlob参照情報を受信する。
-26. WorkerがBlob Storageからフレームを取得する。
-27. WorkerがI/Pフレームを順次デコードし、画像フレームを復元する。
-28. WorkerがMediaPipe Face Landmarkerで顔ランドマークを推定する。
-29. WorkerがEAR・Pitch・Yawを算出する。
-30. 送信開始直後の5秒間でWorker側キャリブレーションを実施する。
-31. 有効フレームが15フレーム以上の場合、Workerが `EAR_open` と `EAR_threshold` を算出する。
-32. Workerがキャリブレーション結果を `calibrations` に保存する。
-33. Workerが以後のフレームでPERCLOSと眠気スコアを算出する。
-34. Workerが1秒単位で `drowsiness_scores` に保存する。
-35. Workerまたは配信基盤がSignalRで眠気スコア通知を送信する。
-36. フロントエンドが現在の眠気レベルを表示する。
-37. `level` が `normal`、`caution`、または `warning` の場合、動画再生を継続する。
+14. 受講者の操作が3秒間ない場合、フロントエンドがHeaderとFooterを150msでfade-outして非表示にする。非表示時に操作があった場合は150msでfade-inして表示する。
+15. フロントエンドがBackendとWorkerの起動状態を確認する。
+16. フロントエンドが動画再生画面で `/ws/sessions/{sessionId}/frames` へ接続する。解析結果イベントは最終仕様ではSignalRで購読し、現行ローカル開発・暫定実装では `EventSource` で `GET /api/sessions/{sessionId}/analysis-events` を購読する。
+17. フロントエンドが動画Frame上にキャリブレーションモーダルを表示し、カメラ画角を表示する。
+18. 受講者が開始ボタンを押す。
+19. BackendとWorkerの起動確認および接続に成功した場合のみ、フロントエンドがキャリブレーション指示とWorker進捗を表示する。
+20. フロントエンドがキャリブレーション用のI/Pフレームを1フレームずつWebSocketで送信する。
+21. Workerからキャリブレーション成功通知を受信後、フロントエンドがモーダルを閉じる。
+22. フロントエンドが動画再生を開始し、カメラ画角画像の送信を継続する。
+23. バックエンドが受信フレームに `receivedAt` を付与する。
+24. バックエンドがフレームをBlob Storageへ保存する。
+25. バックエンドがBlob参照情報をService Busへ投入する。
+26. WorkerがService BusからBlob参照情報を受信する。
+27. WorkerがBlob Storageからフレームを取得する。
+28. WorkerがI/Pフレームを順次デコードし、画像フレームを復元する。
+29. WorkerがMediaPipe Face Landmarkerで顔ランドマークを推定する。
+30. WorkerがEAR・Pitch・Yawを算出する。
+31. キャリブレーション用フレームの送信開始直後にWorker側キャリブレーションを実施する。
+32. 有効フレームが15フレーム以上の場合、Workerが `EAR_open` と `EAR_threshold` を算出する。
+33. Workerがキャリブレーション結果を `calibrations` に保存する。
+34. Workerが以後のフレームでPERCLOSと眠気スコアを算出する。
+35. Workerが1秒単位で `drowsiness_scores` に保存する。
+36. Workerまたは配信基盤が眠気スコア通知を送信する。通知経路は最終仕様ではSignalR、現行ローカル開発・暫定実装ではSSEとし、payload構造はいずれも [`09-realtime-notification.md`](../features/09-realtime-notification.md) に従う。
+37. フロントエンドが現在の眠気レベルを表示する。
+38. `level` が `normal`、`caution`、または `warning` の場合、動画再生を継続する。
 
 ## 6. 期待結果
 
@@ -85,6 +86,7 @@
 - キャリブレーション開始前にBackendとWorkerの起動確認が成功する。
 - キャリブレーションが成功する。
 - 動画教材の再生が許可される。
+- HeaderとFooterは無操作時にfade-outし、操作時にfade-inする。
 - 眠気スコアが算出・保存・通知される。
 - 危険状態でない限り動画再生は継続する。
 

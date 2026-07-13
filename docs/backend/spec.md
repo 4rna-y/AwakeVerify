@@ -31,6 +31,8 @@
 - Iフレーム間隔は1秒、Iフレーム間はPフレームのみ、Bフレームは使用しない。
 - Service Busでは `sessionId` をSession IDとして利用し、同一セッション内の順序処理を保証する。
 - 停止・再開イベントはフロントエンドからAPIで受信し、PostgreSQLへ保存する。
+- ローカル実行時も本番相当の周辺サービスを利用し、PostgreSQL / Blob Storage / Service Bus のローカル代替やインメモリフォールバックは使用しない。
+- リアルタイム通知の最終仕様はSignalRとする。`Azure:SignalR:ConnectionString` が設定されている場合はAzure SignalR Serviceを配信基盤とし、未設定のローカル開発ではASP.NET Core SignalRとして動作する。`/api/sessions/{sessionId}/analysis-events` のSSEは、SignalR未対応のローカル検証ツール向けフォールバックとして、SignalRと同じJSON payloadを配信する。
 
 ## 3. システム内の責務
 
@@ -45,7 +47,8 @@
 - Service Busへのフレーム参照メッセージ投入
 - 停止・再開イベント保存
 - ダッシュボード向けREST API提供
-- SignalR配信基盤との接続
+- SignalR Hub（`AnalysisEventsHub`）による解析結果配信
+- SSEによる解析結果イベントストリーム提供（ローカル検証ツール向けフォールバック）
 
 ## 4. 認証・アカウント仕様
 
@@ -355,11 +358,13 @@ admins
 - `drowsiness_scores` は1秒単位の保存結果である。
 - `playback_events` は `auto_pause` / `resume` を保存する。
 
-## 10. SignalR配信仕様
+## 10. リアルタイム通知配信仕様（SignalR / SSEフォールバック）
 
-Workerが算出した眠気スコア、およびトラッキング状態をAzure SignalR Service経由で配信する。
+リアルタイム通知payloadおよびSignalR / SSEの関係の一次情報は [`09-realtime-notification.md`](../features/09-realtime-notification.md) とする。
 
-バックエンドはSignalRの接続・配信基盤を提供する。
+Workerが算出した眠気スコア、およびトラッキング状態は、SignalR Hub `AnalysisEventsHub`（`/hubs/analysis-events`）経由で配信する。`Azure:SignalR:ConnectionString`（または環境変数 `AZURE_SIGNALR_CONNECTION_STRING`）が設定されている場合は `AddAzureSignalR` によりAzure SignalR Serviceを配信基盤とし、未設定の場合はASP.NET Core SignalRとして同一プロセス内で配信する。
+
+クライアントは接続後にHubメソッド `JoinSession(sessionId)` を呼び出し、`sessionId` ごとのGroup（`session-{sessionId}`）へ参加する。離脱時は `LeaveSession(sessionId)` を呼び出す。バックエンドは解析結果受信時、該当Groupに対してクライアントメソッド `ReceiveAnalysisEvent` を呼び出しpayloadを配信する。
 
 ### 10.1 眠気スコア通知
 
@@ -389,9 +394,28 @@ Workerが算出した眠気スコア、およびトラッキング状態をAzure
 }
 ```
 
-### 10.3 開発・検証用解析結果イベントストリーム
+### 10.3 キャリブレーション状態通知
 
-`/test` ページでWorker推論パイプラインを検証するため、Backendは同一プロセス内の購読者へ解析結果を中継する検証用APIを提供する。
+```json
+{
+  "type": "calibration_status",
+  "sessionId": "uuid",
+  "updatedAt": "2026-06-14T10:00:00Z",
+  "status": "calibrating",
+  "validFrames": 10,
+  "totalFrames": 12,
+  "targetFrames": 25,
+  "earOpen": null,
+  "earThreshold": null
+}
+```
+
+- `status` は `calibrating` / `succeeded` / `failed` のいずれかである。
+- `succeeded` の場合のみ `earOpen` と `earThreshold` に値が入る。
+
+### 10.4 SSE解析結果イベントストリーム（ローカル検証ツール向けフォールバック）
+
+Backendは同一プロセス内の購読者へ解析結果を中継するSSE APIも提供する。これはWorker推論パイプライン検証ページ（`/test`）など、SignalRクライアントへ未移行のローカル検証ツール向けのフォールバックであり、受講者画面（`student-session-page.tsx`）はこのAPIを使用せずSignalRのみに接続する。
 
 購読:
 
@@ -400,8 +424,9 @@ GET /api/sessions/{sessionId}/analysis-events
 ```
 
 - Server-Sent Events (`text/event-stream`) として配信する。
-- `data:` には `drowsiness_score` または `tracking_status` のJSONをそのまま含める。
-- 本APIは開発・検証用途であり、本番の一次通知経路はSignalR配信仕様とする。
+- `data:` には `drowsiness_score` 、`tracking_status` または `calibration_status` のJSONをそのまま含める。
+- SSE payloadは10.1〜10.3のSignalR payloadと同じJSON構造にする。
+- 本APIはローカル検証ツール向けのフォールバック経路であり、本番の一次通知経路はSignalR配信仕様とする。
 
 WorkerからBackendへのpublish:
 
@@ -430,8 +455,9 @@ request:
 
 1. `sessionId` の存在を確認する。
 2. request body の `sessionId` がpathの `sessionId` と一致することを確認する。
-3. `type` が `drowsiness_score` または `tracking_status` であることを確認する。
-4. 同一 `sessionId` の `analysis-events` 購読者へ配信する。
+3. `type` が `drowsiness_score` 、`tracking_status` または `calibration_status` であることを確認する。
+4. 同一 `sessionId` のSignalR Group（`session-{sessionId}`）へ `ReceiveAnalysisEvent` を配信する。
+5. 同一 `sessionId` の `analysis-events` SSE購読者へも同じpayloadを配信する（フォールバック）。
 
 ## 11. ダッシュボード取得API
 

@@ -19,12 +19,21 @@ import {
     studentSessionRoute,
     studentSessionStorageKey,
 } from "./student-session-storage";
+import {
+    StoredTeacherSession,
+    teacherDashboardRoute,
+    teacherSessionStorageKey,
+} from "../teacher/teacher-session-storage";
 
 type LoginMode = "student" | "teacher";
 type LoginState = "idle" | "starting" | "error";
 
 type StartSessionResponse = {
     sessionId: string;
+};
+
+type TeacherLoginResponse = {
+    success: boolean;
 };
 
 const apiBaseUrl =
@@ -86,16 +95,64 @@ export default function StudentPage() {
         }
     }
 
-    function submitTeacherLogin(event: FormEvent<HTMLFormElement>) {
+    async function submitTeacherLogin(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
-        setLoginState("error");
-        setMessage("教員ログインは後続featureでAPI接続します。");
+
+        const normalizedTeacherId = teacherId.trim();
+        if (!normalizedTeacherId || !teacherPassword) {
+            setLoginState("error");
+            setMessage("教員IDとパスワードを入力してください。");
+            return;
+        }
+
+        setLoginState("starting");
+        setMessage(null);
+
+        try {
+            const response = await fetch(`${apiBaseUrl}/api/teacher/login`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    teacherId: normalizedTeacherId,
+                    password: teacherPassword,
+                }),
+            });
+
+            if (!response.ok) {
+                throw new Error(`ログインに失敗しました: ${response.status}`);
+            }
+
+            const data = (await response.json()) as TeacherLoginResponse;
+            if (!data.success) {
+                setLoginState("error");
+                setMessage("教員IDまたはパスワードが正しくありません。");
+                return;
+            }
+
+            const storedSession: StoredTeacherSession = {
+                teacherId: normalizedTeacherId,
+            };
+            sessionStorage.setItem(
+                teacherSessionStorageKey,
+                JSON.stringify(storedSession),
+            );
+            router.push(teacherDashboardRoute);
+        } catch (error) {
+            setLoginState("error");
+            setMessage(
+                error instanceof Error
+                    ? error.message
+                    : "復旧不能なエラーが発生しました。",
+            );
+        }
     }
 
     const canSubmitStudent =
         loginState !== "starting" && studentId.trim().length > 0;
     const canSubmitTeacher =
-        teacherId.trim().length > 0 && teacherPassword.length > 0;
+        loginState !== "starting" &&
+        teacherId.trim().length > 0 &&
+        teacherPassword.length > 0;
 
     return (
         <main className="relative h-screen w-screen overflow-hidden">
@@ -157,6 +214,7 @@ export default function StudentPage() {
                                 <Input
                                     id="teacherId"
                                     value={teacherId}
+                                    disabled={loginState === "starting"}
                                     onChange={(event) =>
                                         setTeacherId(event.target.value)
                                     }
@@ -170,13 +228,16 @@ export default function StudentPage() {
                                     id="teacherPassword"
                                     type="password"
                                     value={teacherPassword}
+                                    disabled={loginState === "starting"}
                                     onChange={(event) =>
                                         setTeacherPassword(event.target.value)
                                     }
                                 />
                             </div>
                             <Button disabled={!canSubmitTeacher} type="submit">
-                                ログイン
+                                {loginState === "starting"
+                                    ? "ログイン中..."
+                                    : "ログイン"}
                             </Button>
                             <Button
                                 type="button"

@@ -1,6 +1,8 @@
 using System.Text.Json;
+using Awaver.Backend.Hubs;
 using Awaver.Backend.Services;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 
 namespace Awaver.Backend.Controllers;
 
@@ -8,7 +10,8 @@ namespace Awaver.Backend.Controllers;
 [Route("api/sessions/{sessionId:guid}")]
 public sealed class AnalysisResultsController(
     ISessionRepository sessions,
-    AnalysisResultBroadcaster broadcaster) : ControllerBase
+    AnalysisResultBroadcaster broadcaster,
+    IHubContext<AnalysisEventsHub> hubContext) : ControllerBase
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -29,6 +32,9 @@ public sealed class AnalysisResultsController(
         var reader = broadcaster.Subscribe(sessionId, out var subscriptionId);
         try
         {
+            await Response.WriteAsync(": connected\n\n", cancellationToken);
+            await Response.Body.FlushAsync(cancellationToken);
+
             await foreach (var json in reader.ReadAllAsync(cancellationToken))
             {
                 await Response.WriteAsync($"data: {json}\n\n", cancellationToken);
@@ -61,9 +67,9 @@ public sealed class AnalysisResultsController(
         }
 
         if (!TryGetString(payload, "type", out var type) ||
-            type is not ("drowsiness_score" or "tracking_status"))
+            type is not ("drowsiness_score" or "tracking_status" or "calibration_status"))
         {
-            return BadRequest("type must be drowsiness_score or tracking_status.");
+            return BadRequest("type must be drowsiness_score, tracking_status, or calibration_status.");
         }
 
         if (!TryGetString(payload, "sessionId", out var payloadSessionId) ||
@@ -74,6 +80,11 @@ public sealed class AnalysisResultsController(
         }
 
         var json = JsonSerializer.Serialize(payload, JsonOptions);
+
+        // SignalR is the primary delivery path; the SSE broadcaster is kept as a fallback for
+        // local tooling (e.g. the /test pipeline page) that has not migrated off EventSource.
+        await hubContext.Clients.Group(AnalysisEventsHub.GroupName(sessionId))
+            .SendAsync(AnalysisEventsHub.ReceiveAnalysisEventMethod, payload, cancellationToken);
         var subscribers = broadcaster.Publish(sessionId, json);
 
         return Accepted(new { subscribers });

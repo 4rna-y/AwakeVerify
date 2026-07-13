@@ -7,6 +7,9 @@ public sealed class AwaverDbContext(DbContextOptions<AwaverDbContext> options) :
 {
     public DbSet<Student> Students => Set<Student>();
     public DbSet<LearningSession> LearningSessions => Set<LearningSession>();
+    public DbSet<PlaybackEvent> PlaybackEvents => Set<PlaybackEvent>();
+    public DbSet<Teacher> Teachers => Set<Teacher>();
+    public DbSet<Admin> Admins => Set<Admin>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -41,6 +44,63 @@ public sealed class AwaverDbContext(DbContextOptions<AwaverDbContext> options) :
             entity.HasOne(session => session.Student)
                 .WithMany(student => student.LearningSessions)
                 .HasForeignKey(session => session.StudentId);
+        });
+
+        modelBuilder.Entity<PlaybackEvent>(entity =>
+        {
+            entity.ToTable("playback_events");
+            entity.HasKey(playbackEvent => playbackEvent.EventId);
+            entity.Property(playbackEvent => playbackEvent.EventId)
+                .HasColumnName("event_id");
+            entity.Property(playbackEvent => playbackEvent.SessionId)
+                .HasColumnName("session_id")
+                .IsRequired();
+            entity.Property(playbackEvent => playbackEvent.Type)
+                .HasColumnName("type")
+                .HasMaxLength(32)
+                .IsRequired();
+            entity.Property(playbackEvent => playbackEvent.OccurredAt)
+                .HasColumnName("occurred_at")
+                .IsRequired();
+            entity.Property(playbackEvent => playbackEvent.VideoTimeSec)
+                .HasColumnName("video_time_sec");
+
+            entity.HasOne(playbackEvent => playbackEvent.LearningSession)
+                .WithMany(session => session.PlaybackEvents)
+                .HasForeignKey(playbackEvent => playbackEvent.SessionId);
+        });
+
+        modelBuilder.Entity<Teacher>(entity =>
+        {
+            entity.ToTable("teachers");
+            entity.HasKey(teacher => teacher.TeacherId);
+            entity.Property(teacher => teacher.TeacherId)
+                .HasColumnName("teacher_id")
+                .HasMaxLength(64);
+            entity.Property(teacher => teacher.PasswordHash)
+                .HasColumnName("password_hash")
+                .IsRequired();
+            entity.Property(teacher => teacher.CreatedAt)
+                .HasColumnName("created_at")
+                .IsRequired();
+            entity.Property(teacher => teacher.CreatedByAdminId)
+                .HasColumnName("created_by_admin_id")
+                .HasMaxLength(64);
+        });
+
+        modelBuilder.Entity<Admin>(entity =>
+        {
+            entity.ToTable("admins");
+            entity.HasKey(admin => admin.AdminId);
+            entity.Property(admin => admin.AdminId)
+                .HasColumnName("admin_id")
+                .HasMaxLength(64);
+            entity.Property(admin => admin.PasswordHash)
+                .HasColumnName("password_hash")
+                .IsRequired();
+            entity.Property(admin => admin.CreatedAt)
+                .HasColumnName("created_at")
+                .IsRequired();
         });
     }
 }

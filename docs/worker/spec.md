@@ -457,13 +457,9 @@ Azure構成では以下を使用する。
 - Service Bus queue: フレーム参照メッセージ
 - Blob Storage: `blobPath` のフレームバイナリ
 
-ローカル検証構成では、Service Bus設定がない場合にBackendのローカル保存先をポーリングする。
+Worker本体はService Bus / Blob Storageを必須入力とし、設定未指定時にローカル保存先へフォールバックしない。
 
-```text
-data/blobs/sessions/{sessionId}/frames/{sequenceNo}_{frameType}.bin
-```
-
-ローカル保存ファイルにはキューメタデータが含まれないため、Workerはファイルパスから `sessionId`、`sequenceNo`、`frameType` を復元し、1秒ごとのIフレーム間隔から `baseIFrameSequenceNo` を推定する。
+ローカル開発では、devcontainer上のService Bus EmulatorおよびAzurite Blob Storageを接続先として設定する。
 
 ### 16.2 処理
 
@@ -493,19 +489,37 @@ payloadは `13.1` / `13.2` と同じ `drowsiness_score` または `tracking_stat
 | --- | --- | --- |
 | `WORKER_MODEL_PATH` | MediaPipeモデルパス | `src/worker/models/face_landmarker.task` |
 | `WORKER_BACKEND_BASE_URL` | Backend publish先 | `http://localhost:5194` |
-| `WORKER_LOCAL_FRAME_ROOT` | ローカルフレーム保存root | `data/blobs` |
-| `WORKER_POLL_INTERVAL_SECONDS` | ローカルポーリング間隔 | `0.2` |
+| `WORKER_BACKEND_HEALTH_URL` | Backend疎通確認先。未指定時はBackend publish先をGETする | 未設定 |
+| `WORKER_POLL_INTERVAL_SECONDS` | Service Bus受信ループの待機間隔 | `0.2` |
+| `WORKER_POST_TIMEOUT_SECONDS` | Backend publish timeout | `3.0` |
+| `WORKER_STARTUP_CHECK_TIMEOUT_SECONDS` | 起動時疎通確認timeout | `3.0` |
 | `WORKER_HEALTH_HOST` | health endpoint bind host | `0.0.0.0` |
 | `WORKER_HEALTH_PORT` | health endpoint port | `8000` |
-| `AZURE_SERVICE_BUS_CONNECTION_STRING` / `Azure__ServiceBus__ConnectionString` | Azure Service Bus接続 | 未設定時はローカルポーリング |
-| `AZURE_SERVICE_BUS_FRAME_QUEUE_NAME` / `Azure__ServiceBus__FrameQueueName` | フレームqueue名 | 未設定時はローカルポーリング |
-| `AZURE_BLOB_STORAGE_CONNECTION_STRING` / `Azure__BlobStorage__ConnectionString` | Azure Blob接続 | 未設定時はローカルポーリング |
-| `AZURE_BLOB_STORAGE_CONTAINER_NAME` / `Azure__BlobStorage__ContainerName` | Blob container名 | `frames` |
+| `AZURE_SERVICE_BUS_CONNECTION_STRING` / `Azure__ServiceBus__ConnectionString` / `SERVICEBUS_CONNECTION_STRING` | Service Bus接続。未設定時は起動失敗 | 必須 |
+| `AZURE_SERVICE_BUS_FRAME_QUEUE_NAME` / `Azure__ServiceBus__FrameQueueName` / `SERVICEBUS_QUEUE_NAME` | フレームqueue名。未設定時は起動失敗 | 必須 |
+| `AZURE_BLOB_STORAGE_CONNECTION_STRING` / `Azure__BlobStorage__ConnectionString` / `BLOB_CONNECTION_STRING` | Blob Storage接続。未設定時は起動失敗 | 必須 |
+| `AZURE_BLOB_STORAGE_CONTAINER_NAME` / `Azure__BlobStorage__ContainerName` / `BLOB_CONTAINER_NAME` | Blob container名 | `frames` |
+
+Worker起動時は、現行 `src/worker/app/main.py` が直接通信する以下の依存先に疎通確認を行う。いずれかに接続できない場合、Workerは処理ループを開始せず、接続できない依存先と理由を表示して終了する。
+
+- Backend: `WORKER_BACKEND_HEALTH_URL` または `WORKER_BACKEND_BASE_URL` へのHTTP GET
+- Service Bus: 対象queueへの `peek_messages`
+- Blob Storage: account information取得
+
+現行実装ではRedis、PostgreSQL、SignalRへWorkerから直接接続しないため、この起動時疎通確認には含めない。RedisによるPERCLOS状態管理など、直接接続を実装した時点で起動時疎通確認対象へ追加する。
 
 health endpoint:
 
 ```http
 GET /health
+OPTIONS /health
+```
+
+Frontendの `/student/session` はブラウザからWorker health endpointへ直接疎通確認を行うため、health endpoint はCORSヘッダーを返す。
+
+```http
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, OPTIONS
 ```
 
 ## 17. 未決定事項
