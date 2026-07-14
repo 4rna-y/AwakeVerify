@@ -8,14 +8,14 @@
 | --- | --- | --- |
 | Backend | Linux App Service | 既存の Backend 仕様に適合し、WebSocket・`/health/live`・`/health/ready` と App Service Plan の CPU autoscale を利用できる。 |
 | Worker | Azure Container Apps | Service Bus custom scaler による scale-to-zero と backlog autoscale を利用する。Worker に ingress は設定しない。 |
-| Container image | Azure Container Registry | `az acr build` で Backend / Worker image を作り、各実行基盤の Managed Identity に `AcrPull` を付与する。 |
+| Container image | public GitHub Container Registry (GHCR) | GitHub Actions またはローカル `docker buildx build --push` で Linux/amd64 の Backend / Worker image を公開し、Azure は匿名 pull する。 |
 | Frame queue | Azure Service Bus Standard/Premium | Session 有効 queue。Basic は意図的に選択できない。 |
 | Frame storage | Azure Blob Storage | `frames` と `videos` container を分離し、`frames/sessions/` だけへ lifecycle 削除規則を適用する。 |
 | 状態 / DB | Azure Managed Redis / PostgreSQL Flexible Server | テスト専用の TLS 有効リソースを作成する。 |
 | 通知 | Azure SignalR Service | 複数 Backend instance の共通配信基盤。 |
 | ログ | Log Analytics | ACA system logs と Azure 標準メトリクスの確認先。 |
 
-`main.bicep` は上記のリソースを作成する。共有 Resource Group 内で既存リソースを変更しないよう、Resource 名は `namePrefix` によって分離する。通常設定は `nonprod.parameters.json`、実値と環境固有名は Git 管理外の secure parameter file に分離する。
+`main.bicep` は上記の Azure リソースを作成し、public GHCR image を App Service と Container Apps に配置する。共有 Resource Group 内で既存リソースを変更しないよう、Resource 名は `namePrefix` によって分離する。通常設定は `nonprod.parameters.json`、実値と環境固有名は Git 管理外の secure parameter file に分離する。
 
 ## 重要な設計
 
@@ -25,7 +25,7 @@
 - Backend は `BACKEND_EXPECTED_INSTANCE_COUNT=backendMaxInstances` として起動する。このため複数 instance 時の Azure SignalR と Redis registry の必須契約が常に有効になる。
 - Backend は Service Bus の `Send` 専用 SAS、Worker は `Listen` 専用 SAS を受け取る。
 - Blob は Backend 用に read/add/create/write/delete/list、Worker 用に read/list の短期 Account SAS を生成する。SAS は `blobSasExpiry` で失効するため、負荷試験中に期限を過ぎない値を設定し、不要になれば Storage account ごと削除する。
-- Worker と Backend は ACR pull のための System Assigned Managed Identity を持つ。Worker の `analysis_worker` app role は Entra ID の管理操作として別途割り当てる。
+- GHCR image は public とし、Azure の registry credential や `AcrPull` role assignment を使わない。Worker の System Assigned Managed Identity には、Entra ID の管理操作として `analysis_worker` app role を別途割り当てる。
 
 ## Secure parameter file
 
@@ -46,7 +46,6 @@ cp infra/azure/nonprod.secrets.parameters.json.example \
 
 ```text
 namePrefix
-acrName
 storageAccountName
 postgresServerName
 postgresAdministratorPassword
@@ -60,20 +59,21 @@ workerBackendTokenScope
 
 IaC拡張前の secure parameter file は、旧 `backendImage`、`databaseConnectionString`、`redisConnectionString`、Blob接続文字列、registry credential 等を持つため互換性がない。既存ファイルをバックアップした上で、必ず最新の `nonprod.secrets.parameters.json.example` から新規作成する。
 
-ここには App Service / ACA へ渡す接続文字列を書かない。Storage SAS、Service Bus SAS、Redis key、SignalR key、PostgreSQL connection string は Bicep が生成して runtime configuration / ACA secret にだけ渡し、deployment output には出力しない。
+ここには App Service / ACA へ渡す接続文字列を書かない。Storage SAS、Service Bus SAS、Redis key、SignalR key、PostgreSQL connection string は Bicep が生成して runtime configuration / ACA secret にだけ渡し、deployment output には出力しない。GHCR image は public でなければならず、PAT をこの parameter file や App Service / ACA へ保存してはならない。
 
 ## 事前準備
 
 1. `awaver-devtest-rg`、リージョン、Service Bus / ACA / App Service / SignalR の quota とコスト上限を確認する。
 2. provider を登録する。`Microsoft.App`、`Microsoft.SignalRService`、`Microsoft.ServiceBus`、`Microsoft.Web`、`Microsoft.Storage`、`Microsoft.OperationalInsights`、`Microsoft.Insights` が必要である。
-3. Backend API の Entra App Registration を作成し、`analysis_worker` application role を定義する。
-4. secure parameter file を作成する。実値を chat、Git、ログ、load-test report へ出力しない。
+3. GitHub Packages で `ghcr.io/4rna-y/awaver-backend` と `ghcr.io/4rna-y/awaver-worker` を **Public** にする。private GHCR image はこの IaC ではサポートしない。
+4. Backend API の Entra App Registration を作成し、`analysis_worker` application role を定義する。
+5. secure parameter file を作成する。実値を chat、Git、ログ、load-test report へ出力しない。
 
 ## デプロイ手順
 
 ### 1. Foundation を作成する
 
-この段階では App Service と ACA Worker を作成しない。ACR、PostgreSQL、Azure Managed Redis、Storage、Service Bus、SignalR、Log Analytics、ACA environment を作成する。
+この段階では App Service と ACA Worker を作成しない。PostgreSQL、Azure Managed Redis、Storage、Service Bus、SignalR、Log Analytics、ACA environment を作成する。
 
 ```bash
 AZURE_RESOURCE_GROUP=awaver-devtest-rg \
@@ -81,17 +81,17 @@ AZURE_PARAMETERS_FILE=infra/azure/nonprod.secrets.parameters.json \
 bash infra/azure/deploy.sh
 ```
 
-### 2. ACR でコンテナイメージをビルドする
+### 2. GHCR にコンテナイメージを公開する
 
-`AZURE_ACR_NAME` は secure parameter file の `acrName` と同じ値にする。
+`.github/workflows/publish-ghcr.yml` を `workflow_dispatch` で実行すると、GitHub-hosted runner が Linux/amd64 image を GHCR へ公開する。実行後、GitHub の Packages 設定で両 image を **Public** にする。
+
+ローカルから公開する場合は、Packages 書き込み権限を持つ GitHub PAT で先に `docker login ghcr.io` を行う。
 
 ```bash
-AZURE_ACR_NAME=<acr-name> \
+CONTAINER_IMAGE_NAMESPACE=4rna-y \
 AZURE_IMAGE_TAG=test \
 bash infra/azure/build-images.sh
 ```
-
-このコマンドは ACR Tasks で Dockerfile をビルドする。ローカル Docker daemon は不要である。
 
 ### 3. Backend と Worker を配置する
 
@@ -104,7 +104,7 @@ bash infra/azure/deploy-workloads.sh
 
 `AZURE_IMAGE_TAG` を使用する場合は、同じ tag を parameter file の `imageTag` に設定するか、`deploy-workloads.sh` 実行時に `--parameters imageTag=<tag>` を追加する。既定は `test`。
 
-デプロイには ACR scope の role assignment 作成権限が必要である。`Contributor` だけで失敗する場合、Resource Group / ACR scope の `Owner` または `User Access Administrator` を持つ実行者が必要になる。
+public GHCR image の pull に Azure role assignment は不要である。
 
 ### 4. Entra ID app role を割り当てる
 
@@ -142,7 +142,6 @@ bash infra/azure/validate.sh
 削除対象は `namePrefix` と secure parameter file に記録した名前で確認する。
 
 ```text
-ACR
 App Service / App Service Plan / autoscale setting
 Container App / Container Apps environment
 PostgreSQL Flexible Server

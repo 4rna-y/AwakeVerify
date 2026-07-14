@@ -6,28 +6,22 @@ param namePrefix string
 @description('Azure region for all newly-created resources.')
 param location string = resourceGroup().location
 
-@description('Set false for the foundation deployment. Set true only after both images have been built in ACR.')
+@description('Set false for the foundation deployment. Set true only after both public container images have been published.')
 param deployWorkloads bool = false
 
-@description('Globally unique Azure Container Registry name.')
-@minLength(5)
-@maxLength(50)
-param acrName string
+@description('Public OCI registry host used by the Backend and Worker images.')
+param containerImageRegistry string = 'ghcr.io'
 
-@allowed([
-  'Basic'
-  'Standard'
-  'Premium'
-])
-param acrSkuName string = 'Basic'
+@description('Public OCI registry namespace that owns the Backend and Worker repositories.')
+param containerImageNamespace string = '4rna-y'
 
-@description('Backend image repository in the created ACR.')
+@description('Backend image repository in the public OCI registry.')
 param backendImageRepository string = 'awaver-backend'
 
-@description('Worker image repository in the created ACR.')
+@description('Worker image repository in the public OCI registry.')
 param workerImageRepository string = 'awaver-worker'
 
-@description('Image tag deployed to Backend and Worker after az acr build finishes.')
+@description('Image tag deployed to Backend and Worker after publication to the public OCI registry.')
 param imageTag string = 'test'
 
 @description('App Service Plan SKU for the Backend. It must support WebSockets and the requested instance count.')
@@ -177,8 +171,8 @@ var containerEnvironmentName = '${namePrefix}-cae'
 var workerAppName = '${namePrefix}-worker'
 var logAnalyticsName = '${namePrefix}-logs'
 var backendExpectedInstanceCount = backendMaxInstances
-var backendImage = '${acr.properties.loginServer}/${backendImageRepository}:${imageTag}'
-var workerImage = '${acr.properties.loginServer}/${workerImageRepository}:${imageTag}'
+var backendImage = '${containerImageRegistry}/${containerImageNamespace}/${backendImageRepository}:${imageTag}'
+var workerImage = '${containerImageRegistry}/${containerImageNamespace}/${workerImageRepository}:${imageTag}'
 
 var backendBlobSas = storage.listAccountSas('2023-05-01', {
   signedServices: 'b'
@@ -198,33 +192,6 @@ var backendBlobConnectionString = 'BlobEndpoint=https://${storage.name}.blob.${e
 var workerBlobConnectionString = 'BlobEndpoint=https://${storage.name}.blob.${environment().suffixes.storage};SharedAccessSignature=${workerBlobSas}'
 var databaseConnectionString = 'Host=${postgres.name}.postgres.database.azure.com;Port=5432;Database=${postgresDatabaseName};Username=${postgresAdministratorLogin};Password=${postgresAdministratorPassword};Ssl Mode=Require;Trust Server Certificate=false'
 var redisConnectionString = '${redis.properties.hostName}:${redisDatabase.properties.port},password=${redisDatabase.listKeys().primaryKey},ssl=True,abortConnect=False'
-var acrPullRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
-
-resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
-  name: acrName
-  location: location
-  sku: {
-    name: acrSkuName
-  }
-  tags: tags
-  properties: {
-    adminUserEnabled: false
-    publicNetworkAccess: 'Enabled'
-    policies: {
-      quarantinePolicy: {
-        status: 'disabled'
-      }
-      trustPolicy: {
-        type: 'Notary'
-        status: 'disabled'
-      }
-      retentionPolicy: {
-        days: 7
-        status: 'enabled'
-      }
-    }
-  }
-}
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: logAnalyticsName
@@ -499,7 +466,6 @@ resource backendApp 'Microsoft.Web/sites@2023-12-01' = if (deployWorkloads) {
     clientAffinityEnabled: false
     siteConfig: {
       linuxFxVersion: 'DOCKER|${backendImage}'
-      acrUseManagedIdentityCreds: true
       alwaysOn: true
       healthCheckPath: '/health/ready'
       webSocketsEnabled: true
@@ -584,15 +550,7 @@ resource backendApp 'Microsoft.Web/sites@2023-12-01' = if (deployWorkloads) {
   }
 }
 
-resource backendAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployWorkloads) {
-  name: guid(acr.id, backendApp.id, acrPullRoleDefinitionId)
-  scope: acr
-  properties: {
-    roleDefinitionId: acrPullRoleDefinitionId
-    principalId: backendApp!.identity.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
+
 
 resource backendAutoscale 'Microsoft.Insights/autoscaleSettings@2022-10-01' = if (deployWorkloads) {
   name: '${backendPlanName}-cpu-autoscale'
@@ -665,12 +623,6 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkload
     managedEnvironmentId: containerEnvironment.id
     configuration: {
       activeRevisionsMode: 'Single'
-      registries: [
-        {
-          server: acr.properties.loginServer
-          identity: 'system'
-        }
-      ]
       secrets: [
         {
           name: 'worker-blob-connection'
@@ -809,17 +761,7 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkload
   }
 }
 
-resource workerAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployWorkloads) {
-  name: guid(acr.id, workerApp.id, acrPullRoleDefinitionId)
-  scope: acr
-  properties: {
-    roleDefinitionId: acrPullRoleDefinitionId
-    principalId: workerApp!.identity.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-output acrLoginServer string = acr.properties.loginServer
+output containerImageRegistry string = containerImageRegistry
 output backendImageReference string = backendImage
 output workerImageReference string = workerImage
 output postgresServerHost string = '${postgres.name}.postgres.database.azure.com'
