@@ -10,7 +10,7 @@
     "backendImageRepository": { "value": "awaver-backend" },
     "workerImageRepository": { "value": "awaver-worker" },
     "imageTag": { "value": "test" },
-    "backendPlanSkuName": { "value": "P1v3" },
+    "backendPlanSkuName": { "value": "S1" },
     "backendMinInstances": { "value": 1 },
     "backendMaxInstances": { "value": 2 },
     "backendCpuScaleOutThreshold": { "value": 70 },

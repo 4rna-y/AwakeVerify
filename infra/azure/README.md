@@ -83,7 +83,7 @@ bash infra/azure/deploy.sh
 
 ### 2. GHCR にコンテナイメージを公開する
 
-`.github/workflows/publish-ghcr.yml` を `workflow_dispatch` で実行すると、GitHub-hosted runner が Linux/amd64 image を GHCR へ公開する。実行後、GitHub の Packages 設定で両 image を **Public** にする。
+`.github/workflows/publish-ghcr.yml` を `workflow_dispatch` で実行すると、GitHub-hosted runner が Linux/amd64 image を GHCR へ公開する。Worker image は公式 MediaPipe Face Landmarker model を build 時にダウンロードし、SHA-256 を検証して含める。実行後、GitHub の Packages 設定で両 image を **Public** にする。
 
 ローカルから公開する場合は、Packages 書き込み権限を持つ GitHub PAT で先に `docker login ghcr.io` を行う。
 
