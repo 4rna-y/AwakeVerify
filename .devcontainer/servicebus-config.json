@@ -2,7 +2,7 @@
     "UserConfig": {
         "Namespaces": [
             {
-                "Name": "local",
+                "Name": "sbemulatorns",
                 "Queues": [
                     {
                         "Name": "frame-processing-queue",
@@ -11,7 +11,7 @@
                             "DeadLetteringOnMessageExpiration": false,
                             "LockDuration": "PT1M",
                             "MaxDeliveryCount": 10,
-                            "RequireSession": false,
+                            "RequiresSession": true,
                             "MaxSizeInMegabytes": 1024
                         }
                     }

@@ -5,16 +5,20 @@ import socket
 import tempfile
 import threading
 from http.client import HTTPResponse
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast, override
 from unittest import TestCase
+from unittest.mock import MagicMock, patch
 from urllib.request import Request, urlopen
 
 from app.main import (
     WorkerConfig,
     check_backend_dependency,
+    check_service_bus_dependency,
     is_azure_frame_source_enabled,
+    normalize_redis_connection_string,
     start_health_server,
     validate_config,
 )
@@ -110,6 +114,41 @@ class StartupChecksTests(TestCase):
             self.assertIn("local fallback is disabled", str(context.exception))
             self.assertIn("SERVICEBUS_CONNECTION_STRING", str(context.exception))
             self.assertIn("BLOB_CONNECTION_STRING", str(context.exception))
+
+    def test_service_bus_probe_opens_a_sender_link_without_waiting_for_an_active_session(self) -> None:
+        sender = MagicMock()
+        sender.__enter__.return_value = sender
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.get_queue_sender.return_value = sender
+        service_bus_client = SimpleNamespace(from_connection_string=MagicMock(return_value=client))
+        azure_servicebus = SimpleNamespace(ServiceBusClient=service_bus_client)
+
+        with patch("builtins.__import__", return_value=azure_servicebus):
+            result = check_service_bus_dependency(
+                service_bus_connection_string="Endpoint=sb://example/;SharedAccessKeyName=name;SharedAccessKey=key",
+                queue_name="frame-processing-queue",
+                timeout_seconds=3,
+            )
+
+        self.assertTrue(result.reachable)
+        self.assertEqual(result.detail, "queue sender link=frame-processing-queue")
+        client.get_queue_sender.assert_called_once_with(queue_name="frame-processing-queue")
+        client.get_queue_receiver.assert_not_called()
+
+    def test_legacy_devcontainer_redis_connection_string_is_normalized_to_a_url(self) -> None:
+        result = normalize_redis_connection_string("redis:6379,password=R8spudTivuoA5XUSqBDxvA==")
+
+        self.assertEqual(result, "redis://:R8spudTivuoA5XUSqBDxvA%3D%3D@redis:6379/0")
+
+    def test_redis_url_is_left_unchanged(self) -> None:
+        connection_string = "rediss://:encoded-password@cache.example:6380/2?ssl_cert_reqs=required"
+
+        self.assertEqual(normalize_redis_connection_string(connection_string), connection_string)
+
+    def test_redis_connection_string_requires_a_host(self) -> None:
+        with self.assertRaisesRegex(ValueError, "REDIS_CONNECTION_STRING"):
+            normalize_redis_connection_string("password=not-an-endpoint")
 
     def test_worker_health_endpoint_allows_browser_cors_checks(self) -> None:
         port = find_free_port()

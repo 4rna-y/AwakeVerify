@@ -2,6 +2,8 @@ FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Playwright Chromium runtime dependencies are installed alongside the devcontainer tools.
+# Browser binaries are installed from the project's locked @playwright/test version in post-create.sh.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     wget \
@@ -23,11 +25,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon-x11-0 \
     libxcb-cursor0 \
     libxcb-xinerama0 \
+    fonts-freefont-ttf \
+    fonts-ipafont-gothic \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    fonts-tlwg-loma-otf \
+    fonts-unifont \
+    fonts-wqy-zenhei \
+    libasound2t64 \
+    libfontenc1 \
+    libnspr4 \
+    libnss3 \
+    libxfont2 \
+    x11-xkb-utils \
+    xfonts-cyrillic \
+    xfonts-encodings \
+    xfonts-scalable \
+    xfonts-utils \
+    xserver-common \
+    xvfb \
     x11-apps \
     xauth \
     v4l-utils \
     build-essential \
     python3-dev \
+    bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \

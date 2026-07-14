@@ -1,42 +1,51 @@
+using Microsoft.AspNetCore.Identity;
 using System.Security.Cryptography;
 
 namespace Awaver.Backend.Services;
 
 public static class PasswordHasher
 {
-    private const int SaltSizeBytes = 16;
-    private const int HashSizeBytes = 32;
-    private const int Iterations = 100_000;
-    private static readonly HashAlgorithmName Algorithm = HashAlgorithmName.SHA256;
+    private static readonly IPasswordHasher<object> Hasher = new PasswordHasher<object>();
+    private static readonly object User = new();
 
-    public static string Hash(string password)
-    {
-        var salt = RandomNumberGenerator.GetBytes(SaltSizeBytes);
-        var hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, Iterations, Algorithm, HashSizeBytes);
-        return $"{Iterations}.{Convert.ToBase64String(salt)}.{Convert.ToBase64String(hash)}";
-    }
+    public static string Hash(string password) => Hasher.HashPassword(User, password);
 
-    public static bool Verify(string password, string passwordHash)
+    public static bool Verify(string password, string passwordHash) => Verify(password, passwordHash, out _);
+
+    public static bool Verify(string password, string passwordHash, out bool needsRehash)
     {
-        var parts = passwordHash.Split('.');
-        if (parts.Length != 3 || !int.TryParse(parts[0], out var iterations))
+        needsRehash = false;
+        if (passwordHash.StartsWith("AQAAAA", StringComparison.Ordinal))
         {
-            return false;
+            try
+            {
+                var result = Hasher.VerifyHashedPassword(User, passwordHash, password);
+                needsRehash = result == PasswordVerificationResult.SuccessRehashNeeded;
+                return result != PasswordVerificationResult.Failed;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
         }
 
-        byte[] salt;
-        byte[] expectedHash;
+        // Compatibility for the former local format: iterations.base64(salt).base64(hash).
+        // A successful legacy verification is immediately upgraded by the login controller.
+        var parts = passwordHash.Split('.');
+        if (parts.Length != 3 || !int.TryParse(parts[0], out var iterations) || iterations <= 0) return false;
         try
         {
-            salt = Convert.FromBase64String(parts[1]);
-            expectedHash = Convert.FromBase64String(parts[2]);
+            var salt = Convert.FromBase64String(parts[1]);
+            var expectedHash = Convert.FromBase64String(parts[2]);
+            if (salt.Length == 0 || expectedHash.Length == 0) return false;
+            var actualHash = Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, expectedHash.Length);
+            var valid = CryptographicOperations.FixedTimeEquals(actualHash, expectedHash);
+            needsRehash = valid;
+            return valid;
         }
         catch (FormatException)
         {
             return false;
         }
-
-        var actualHash = Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, Algorithm, expectedHash.Length);
-        return CryptographicOperations.FixedTimeEquals(actualHash, expectedHash);
     }
 }

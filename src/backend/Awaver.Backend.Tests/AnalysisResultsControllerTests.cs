@@ -1,101 +1,185 @@
 using System.Text.Json;
 using Awaver.Backend.Controllers;
-using Awaver.Backend.Hubs;
+using Awaver.Backend.Data;
+using Awaver.Backend.Models;
 using Awaver.Backend.Services;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.SignalR;
+using Microsoft.EntityFrameworkCore;
 
 namespace Awaver.Backend.Tests;
 
 public sealed class AnalysisResultsControllerTests
 {
     [Fact]
-    public async Task PublishAnalysisResult_BroadcastsToSessionGroupViaSignalR()
+    public async Task AcceptedScore_IsPersistedWithOneOutboxRecordAndIsIdempotent()
     {
-        var sessions = new InMemorySessionRepository();
-        var session = await sessions.StartSessionAsync("s12345", CancellationToken.None);
-        var broadcaster = new AnalysisResultBroadcaster();
-        var hubClients = new FakeHubClients();
-        var controller = new AnalysisResultsController(sessions, broadcaster, new FakeHubContext(hubClients));
+        await using var db = CreateDb();
+        var session = await SeedSessionAsync(db);
+        db.Calibrations.Add(new Calibration { SessionId = session.SessionId, SourceSequenceNo = 1, EarOpen = .30m, EarThreshold = .225m, CalibratedAt = DateTimeOffset.Parse("2026-06-14T10:00:00Z") });
+        await db.SaveChangesAsync();
+        var controller = new AnalysisResultsController(db, new AnalysisResultBroadcaster());
+        var payload = Payload(session.SessionId, 10);
 
-        var payload = JsonSerializer.Deserialize<JsonElement>(
-            $$"""{"type":"drowsiness_score","sessionId":"{{session.SessionId}}","score":0.9}""");
+        var first = await controller.PublishAnalysisResult(session.SessionId, payload, CancellationToken.None);
+        var replay = await controller.PublishAnalysisResult(session.SessionId, payload, CancellationToken.None);
 
-        var result = await controller.PublishAnalysisResult(session.SessionId, payload, CancellationToken.None);
-
-        Assert.IsType<AcceptedResult>(result);
-        Assert.Equal(AnalysisEventsHub.GroupName(session.SessionId), hubClients.LastGroupName);
-        Assert.Equal(AnalysisEventsHub.ReceiveAnalysisEventMethod, hubClients.LastGroupProxy?.LastMethod);
+        Assert.IsType<AcceptedResult>(first);
+        Assert.IsType<AcceptedResult>(replay);
+        var score = Assert.Single(db.DrowsinessScores);
+        Assert.Equal(123.45, score.VideoTimeSec);
+        var outboxEvent = Assert.Single(db.AnalysisEventOutbox);
+        using var outboxPayload = JsonDocument.Parse(outboxEvent.Payload);
+        Assert.Equal(123.45, outboxPayload.RootElement.GetProperty("videoTimeSec").GetDouble());
     }
 
     [Fact]
-    public async Task PublishAnalysisResult_ReturnsBadRequestForInvalidType_WithoutBroadcasting()
+    public async Task ReusedSequenceWithDifferentScore_IsConflict()
     {
-        var sessions = new InMemorySessionRepository();
-        var session = await sessions.StartSessionAsync("s12345", CancellationToken.None);
-        var broadcaster = new AnalysisResultBroadcaster();
-        var hubClients = new FakeHubClients();
-        var controller = new AnalysisResultsController(sessions, broadcaster, new FakeHubContext(hubClients));
+        await using var db = CreateDb();
+        var session = await SeedSessionAsync(db);
+        db.Calibrations.Add(new Calibration { SessionId = session.SessionId, SourceSequenceNo = 1, EarOpen = .30m, EarThreshold = .225m, CalibratedAt = DateTimeOffset.Parse("2026-06-14T10:00:00Z") });
+        await db.SaveChangesAsync();
+        var controller = new AnalysisResultsController(db, new AnalysisResultBroadcaster());
 
-        var payload = JsonSerializer.Deserialize<JsonElement>(
-            $$"""{"type":"unknown_type","sessionId":"{{session.SessionId}}"}""");
+        await controller.PublishAnalysisResult(session.SessionId, Payload(session.SessionId, 10), CancellationToken.None);
+        var conflict = await controller.PublishAnalysisResult(session.SessionId, Payload(session.SessionId, 10, .9m), CancellationToken.None);
 
-        var result = await controller.PublishAnalysisResult(session.SessionId, payload, CancellationToken.None);
-
-        Assert.IsType<BadRequestObjectResult>(result);
-        Assert.Null(hubClients.LastGroupName);
+        Assert.IsType<ConflictObjectResult>(conflict);
+        Assert.Single(db.DrowsinessScores);
     }
 
-    private sealed class FakeHubContext(FakeHubClients clients) : IHubContext<AnalysisEventsHub>
+    [Fact]
+    public async Task ReusedSequenceWithDifferentVideoTimeSec_IsConflict()
     {
-        public IHubClients Clients { get; } = clients;
+        await using var db = CreateDb();
+        var session = await SeedSessionAsync(db);
+        db.Calibrations.Add(new Calibration { SessionId = session.SessionId, SourceSequenceNo = 1, EarOpen = .30m, EarThreshold = .225m, CalibratedAt = DateTimeOffset.Parse("2026-06-14T10:00:00Z") });
+        await db.SaveChangesAsync();
+        var controller = new AnalysisResultsController(db, new AnalysisResultBroadcaster());
 
-        public IGroupManager Groups => throw new NotSupportedException();
+        await controller.PublishAnalysisResult(session.SessionId, Payload(session.SessionId, 10), CancellationToken.None);
+        var conflict = await controller.PublishAnalysisResult(session.SessionId, Payload(session.SessionId, 10, videoTimeSec: 123.46), CancellationToken.None);
+
+        Assert.IsType<ConflictObjectResult>(conflict);
+        Assert.Single(db.DrowsinessScores);
     }
 
-    private sealed class FakeHubClients : IHubClients
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"videoTimeSec\":-0.01}")]
+    [InlineData("{\"videoTimeSec\":1e999}")]
+    public async Task ScoreRequiresNonNegativeFiniteVideoTimeSec(string replacement)
     {
-        public string? LastGroupName { get; private set; }
+        await using var db = CreateDb();
+        var session = await SeedSessionAsync(db);
+        db.Calibrations.Add(new Calibration { SessionId = session.SessionId, SourceSequenceNo = 1, EarOpen = .30m, EarThreshold = .225m, CalibratedAt = DateTimeOffset.Parse("2026-06-14T10:00:00Z") });
+        await db.SaveChangesAsync();
+        var controller = new AnalysisResultsController(db, new AnalysisResultBroadcaster());
+        var payload = Payload(session.SessionId, 10);
+        var invalidPayload = JsonSerializer.Deserialize<JsonElement>(replacement == "{}"
+            ? payload.GetRawText().Replace(",\"videoTimeSec\":123.45", string.Empty)
+            : payload.GetRawText().Replace("\"videoTimeSec\":123.45", replacement.Trim('{', '}')));
 
-        public FakeClientProxy? LastGroupProxy { get; private set; }
-
-        public IClientProxy Group(string groupName)
-        {
-            LastGroupName = groupName;
-            LastGroupProxy = new FakeClientProxy();
-            return LastGroupProxy;
-        }
-
-        public IClientProxy All => throw new NotSupportedException();
-
-        public IClientProxy AllExcept(IReadOnlyList<string> excludedConnectionIds) => throw new NotSupportedException();
-
-        public IClientProxy Client(string connectionId) => throw new NotSupportedException();
-
-        public IClientProxy Clients(IReadOnlyList<string> connectionIds) => throw new NotSupportedException();
-
-        public IClientProxy Groups(IReadOnlyList<string> groupNames) => throw new NotSupportedException();
-
-        public IClientProxy GroupExcept(string groupName, IReadOnlyList<string> excludedConnectionIds) => throw new NotSupportedException();
-
-        public IClientProxy OthersInGroup(string groupName) => throw new NotSupportedException();
-
-        public IClientProxy User(string userId) => throw new NotSupportedException();
-
-        public IClientProxy Users(IReadOnlyList<string> userIds) => throw new NotSupportedException();
+        Assert.IsType<BadRequestObjectResult>(await controller.PublishAnalysisResult(session.SessionId, invalidPayload, CancellationToken.None));
+        Assert.Empty(db.DrowsinessScores);
+        Assert.Empty(db.AnalysisEventOutbox);
     }
 
-    private sealed class FakeClientProxy : IClientProxy
+    [Fact]
+    public async Task SuccessfulCalibration_IsPersistedWithOutboxAndRetryIsIdempotent()
     {
-        public string? LastMethod { get; private set; }
+        await using var db = CreateDb();
+        var session = await SeedSessionAsync(db);
+        var controller = new AnalysisResultsController(db, new AnalysisResultBroadcaster());
+        var payload = CalibrationPayload(session.SessionId, "succeeded");
 
-        public object?[]? LastArgs { get; private set; }
+        var first = await controller.PublishAnalysisResult(session.SessionId, payload, CancellationToken.None);
+        var retry = await controller.PublishAnalysisResult(session.SessionId, payload, CancellationToken.None);
 
-        public Task SendCoreAsync(string method, object?[] args, CancellationToken cancellationToken = default)
-        {
-            LastMethod = method;
-            LastArgs = args;
-            return Task.CompletedTask;
-        }
+        Assert.IsType<AcceptedResult>(first);
+        Assert.IsType<AcceptedResult>(retry);
+        var calibration = Assert.Single(db.Calibrations);
+        Assert.Equal(25, calibration.SourceSequenceNo);
+        Assert.Equal(DateTimeOffset.Parse("2026-06-14T10:00:05Z"), calibration.CalibratedAt);
+        Assert.Equal(.31m, calibration.EarOpen);
+        Assert.Equal(.2325m, calibration.EarThreshold);
+        Assert.Single(db.AnalysisEventOutbox);
     }
+
+    [Fact]
+    public async Task FailedCalibration_IsNotPersistedButIsQueuedForNotification()
+    {
+        await using var db = CreateDb();
+        var session = await SeedSessionAsync(db);
+        var controller = new AnalysisResultsController(db, new AnalysisResultBroadcaster());
+
+        var result = await controller.PublishAnalysisResult(session.SessionId, CalibrationPayload(session.SessionId, "failed"), CancellationToken.None);
+
+        Assert.IsType<AcceptedResult>(result);
+        Assert.Empty(db.Calibrations);
+        Assert.Single(db.AnalysisEventOutbox);
+    }
+
+    [Fact]
+    public async Task SuccessfulCalibrationRequiresExactly25FramesAndAtLeast15ValidFrames()
+    {
+        await using var db = CreateDb();
+        var session = await SeedSessionAsync(db);
+        var controller = new AnalysisResultsController(db, new AnalysisResultBroadcaster());
+
+        var rejected = await controller.PublishAnalysisResult(session.SessionId, CalibrationPayload(session.SessionId, "succeeded", validFrames: 14), CancellationToken.None);
+        Assert.IsType<BadRequestObjectResult>(rejected);
+        Assert.Empty(db.Calibrations);
+        Assert.Empty(db.AnalysisEventOutbox);
+
+        var accepted = await controller.PublishAnalysisResult(session.SessionId, CalibrationPayload(session.SessionId, "succeeded", validFrames: 15), CancellationToken.None);
+        Assert.IsType<AcceptedResult>(accepted);
+        Assert.Single(db.Calibrations);
+    }
+
+    [Fact]
+    public async Task SuccessfulCalibrationRejectsWrongFrameCountsAndThresholdRatio()
+    {
+        await using var db = CreateDb();
+        var session = await SeedSessionAsync(db);
+        var controller = new AnalysisResultsController(db, new AnalysisResultBroadcaster());
+
+        var wrongTarget = CalibrationPayload(session.SessionId, "succeeded");
+        wrongTarget = JsonSerializer.Deserialize<JsonElement>(wrongTarget.GetRawText().Replace("\"targetFrames\":25", "\"targetFrames\":24"));
+        Assert.IsType<BadRequestObjectResult>(await controller.PublishAnalysisResult(session.SessionId, wrongTarget, CancellationToken.None));
+
+        var wrongRatio = CalibrationPayload(session.SessionId, "succeeded");
+        wrongRatio = JsonSerializer.Deserialize<JsonElement>(wrongRatio.GetRawText().Replace("\"earThreshold\":0.2325", "\"earThreshold\":0.2"));
+        Assert.IsType<BadRequestObjectResult>(await controller.PublishAnalysisResult(session.SessionId, wrongRatio, CancellationToken.None));
+        Assert.Empty(db.Calibrations);
+        Assert.Empty(db.AnalysisEventOutbox);
+    }
+
+    [Fact]
+    public async Task TrackingStatusUsesSourceSequenceAsDurableIdempotencyKey()
+    {
+        await using var db = CreateDb();
+        var session = await SeedSessionAsync(db);
+        var controller = new AnalysisResultsController(db, new AnalysisResultBroadcaster());
+        var payload = JsonSerializer.Deserialize<JsonElement>($"{{\"type\":\"tracking_status\",\"sessionId\":\"{session.SessionId}\",\"sourceSequenceNo\":42,\"detectedAt\":\"2026-06-14T10:00:00Z\",\"status\":\"face_not_detected\"}}");
+
+        Assert.IsType<AcceptedResult>(await controller.PublishAnalysisResult(session.SessionId, payload, CancellationToken.None));
+        Assert.IsType<AcceptedResult>(await controller.PublishAnalysisResult(session.SessionId, payload, CancellationToken.None));
+        Assert.Single(db.AnalysisEventOutbox);
+
+        var conflict = JsonSerializer.Deserialize<JsonElement>(payload.GetRawText().Replace("10:00:00", "10:00:01"));
+        Assert.IsType<ConflictObjectResult>(await controller.PublishAnalysisResult(session.SessionId, conflict, CancellationToken.None));
+        Assert.Single(db.AnalysisEventOutbox);
+    }
+
+    private static JsonElement Payload(Guid sessionId, long sequence, decimal score = .8m, double videoTimeSec = 123.45) => JsonSerializer.Deserialize<JsonElement>($"{{\"type\":\"drowsiness_score\",\"sessionId\":\"{sessionId}\",\"sourceSequenceNo\":{sequence},\"scoredAt\":\"2026-06-14T10:00:10Z\",\"score\":{score},\"level\":\"danger\",\"perclos\":0.6,\"ear\":0.18,\"pitchDeg\":12.4,\"yawDeg\":4.2,\"videoTimeSec\":{videoTimeSec},\"shouldPause\":true}}");
+    private static JsonElement CalibrationPayload(Guid sessionId, string status, int validFrames = 18) => status == "succeeded"
+        ? JsonSerializer.Deserialize<JsonElement>($"{{\"type\":\"calibration_status\",\"sessionId\":\"{sessionId}\",\"status\":\"succeeded\",\"validFrames\":{validFrames},\"totalFrames\":25,\"targetFrames\":25,\"sourceSequenceNo\":25,\"calibratedAt\":\"2026-06-14T10:00:05Z\",\"earOpen\":0.31,\"earThreshold\":0.2325}}")
+        : JsonSerializer.Deserialize<JsonElement>($"{{\"type\":\"calibration_status\",\"sessionId\":\"{sessionId}\",\"status\":\"failed\",\"validFrames\":14,\"totalFrames\":25,\"targetFrames\":25}}");
+    private static async Task<LearningSession> SeedSessionAsync(AwaverDbContext db)
+    {
+        var session = await new EfSessionRepository(db).StartSessionAsync("student", CancellationToken.None);
+        return await db.LearningSessions.SingleAsync(item => item.SessionId == session.SessionId);
+    }
+    private static AwaverDbContext CreateDb() => new(new DbContextOptionsBuilder<AwaverDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
 }

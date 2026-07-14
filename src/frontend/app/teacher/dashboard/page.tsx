@@ -1,3 +1,5 @@
-import TeacherDashboardPage from "./teacher-dashboard-page";
+import { redirect } from "next/navigation";
 
-export default TeacherDashboardPage;
+export default function TeacherDashboardPage() {
+    redirect("/admin/dashboard");
+}

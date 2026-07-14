@@ -1,6 +1,10 @@
 .env
 */.env
 
+# Azure deployment parameter files may contain connection strings, registry credentials,
+# and database passwords. Keep only the redacted example in source control.
+infra/azure/*.secrets.parameters.json
+
 /.pnpm-store/
 
 **/obj/
@@ -18,3 +22,4 @@ src/backend/Awaver.Backend/data/
 src/worker/models/*.task
 
 /.claude/
+/.codex/

@@ -7,7 +7,7 @@
 
 ## 1. 機能概要
 
-動画教材の自動停止時と再開時に、フロントエンドがバックエンドへイベントを送信し、PostgreSQLへ保存する機能である。
+動画教材の手動停止・自動停止・再開・受講完了時に、フロントエンドがバックエンドへイベントを送信し、PostgreSQLへ保存する機能である。受講完了イベントはセッションの終了時刻も確定する。
 
 ## 2. 対象コンポーネント
 
@@ -17,8 +17,10 @@
 
 ## 3. トリガー
 
+- 受講者が動画を手動で一時停止した。
 - 眠気レベルが危険状態になり、動画が自動停止した。
-- 眠気レベルが正常に戻り、受講者が再開ボタンを押した。
+- 一時停止後、受講者が再生を再開した。
+- 動画教材が最後まで再生された。
 
 ## 4. API仕様
 
@@ -36,13 +38,13 @@ POST /api/sessions/{sessionId}/playback-events
 }
 ```
 
-再開時:
+受講完了時:
 
 ```json
 {
-  "type": "resume",
+  "type": "completed",
   "occurredAt": "2026-06-14T10:02:00Z",
-  "videoTimeSec": 123.45
+  "videoTimeSec": 600
 }
 ```
 
@@ -53,23 +55,27 @@ POST /api/sessions/{sessionId}/playback-events
 `type` は以下を許可する。
 
 ```text
+manual_pause
 auto_pause
 resume
+completed
 ```
 
 ## 6. 処理仕様
 
 ### 6.1 フロントエンド
 
-1. 自動停止時に `auto_pause` イベントを送信する。
-2. 再開時に `resume` イベントを送信する。
-3. `occurredAt` と `videoTimeSec` を付与する。
+1. 受講者の手動停止時に `manual_pause`、眠気または顔未検出による停止時に `auto_pause` を送信する。
+2. 手動停止または自動停止から実際に再生を再開した時点で `resume` を送信する。初回の再生開始はイベントに記録しない。
+3. 動画終了時に `completed` を一度だけ送信する。
+4. すべてのイベントに `occurredAt` と `videoTimeSec` を付与する。
 
 ### 6.2 バックエンド
 
-1. `sessionId` の存在を確認する。
-2. `type` を検証する。
-3. `playback_events` に保存する。
+1. `student_session` Cookieに結び付いた `sessionId` と一致することを確認する。
+2. `type`、`occurredAt`、`videoTimeSec` を検証する。
+3. `completed` 以外は `playback_events` に保存する。
+4. 最初の `completed` は `playback_events` に保存し、同一トランザクションで `learning_sessions.ended_at` を `occurredAt` に設定する。終了済みセッションへの重複した `completed` は成功として受け入れるが、イベントと終了時刻を追加・更新しない。
 
 ## 7. データ保存
 

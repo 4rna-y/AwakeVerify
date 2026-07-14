@@ -7,7 +7,10 @@ public sealed class InMemorySessionRepository : ISessionRepository
     private readonly ConcurrentDictionary<string, DateTimeOffset> _students = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<Guid, SessionStartResult> _sessions = new();
 
-    public Task<SessionStartResult> StartSessionAsync(string studentId, CancellationToken cancellationToken)
+    public Task<SessionStartResult> StartSessionAsync(string studentId, CancellationToken cancellationToken) =>
+        StartSessionAsync(studentId, "default", cancellationToken);
+
+    public Task<SessionStartResult> StartSessionAsync(string studentId, string videoId, CancellationToken cancellationToken)
     {
         var normalizedStudentId = studentId.Trim();
         var now = DateTimeOffset.UtcNow;

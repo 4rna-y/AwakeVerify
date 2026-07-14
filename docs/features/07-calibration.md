@@ -83,23 +83,32 @@ BackendとWorkerの起動確認に成功した場合のみ、5秒間のキャリ
 キャリブレーションに失敗しました。顔が正面から映るようにカメラ位置を調整してください。
 ```
 
+### 10.1 リロード後の復帰
+
+同一ブラウザタブで受講中にリロードした場合、フロントエンドは保持した `sessionId` とHttpOnly `student_session` Cookieを照合する。認可された当該セッションについてBackendに成功済みキャリブレーションを問い合わせ、保存結果がある場合はキャリブレーションモーダルを表示せず、同じタブに保存した動画進捗へシークする。カメラ・WebSocket・SignalRの再接続後に画面中央の再生ボタンを表示し、受講者が押した場合のみ受講を開始する。ブラウザ内の完了記録だけでは再生を許可しない。保存結果がない場合は通常どおりキャリブレーションを実施する。
+
 ## 11. 画面状態
 
 | 状態 | 条件 | 表示 | 操作 |
 | --- | --- | --- | --- |
 | `calibration_ready` | セッション開始・カメラ取得後 | 動画Frame上のキャリブレーションモーダル、カメラ画角、開始ボタン、Backend/Worker起動確認状態 | 動画再生を禁止する。開始前にBackendとWorkerの起動確認を行う。 |
 | `calibrating` | BackendとWorkerの起動確認成功後5秒間 | カメラ画角、進捗と案内文 | 動画再生を禁止する。 |
-| `ready` | キャリブレーション成功後 | 動画Frame、Float録画状態、Float再生コントロール | モーダルを閉じ、動画再生とカメラ画角画像送信を開始する。 |
+| `ready` | キャリブレーション成功後、または保存済み成功結果の復元後 | 動画Frame中央の再生ボタン、Float再生コントロール | モーダルを閉じる。受講者が中央の再生ボタンを押すまで動画再生とカメラ画角画像送信を開始しない。 |
 
-## 12. データ保存
+## 12. データ保存と確定責務
+
+`calibrations` は受講セッションごとに**成功したキャリブレーションを1件だけ**保持する。失敗した試行はDB保存せず、`calibration_status: failed` 通知で受講者に再試行を促す。成功済みセッションに同一結果が再送された場合は冪等成功とし、異なる閾値での上書きは拒否する。
 
 ```text
 calibrations
-- session_id
-- ear_open
-- ear_threshold
-- calibrated_at
+- session_id uuid primary key, foreign key -> learning_sessions.session_id
+- ear_open numeric not null
+- ear_threshold numeric not null
+- calibrated_at timestamptz not null
+- source_sequence_no bigint not null
 ```
+
+WorkerはPostgreSQLへ直接接続・直接書込みをしない。Workerは `sourceSequenceNo` を含む成功結果を、サービス認証済みの `POST /api/sessions/{sessionId}/analysis-results` へ送る。Backendがトランザクション内で `calibrations` を保存し、同じ通知payloadをTransactional Outboxへ登録する。通知配信失敗は保存済みのキャリブレーションを失わせない。詳細は [`08-drowsiness-scoring.md`](./08-drowsiness-scoring.md) と [`09-realtime-notification.md`](./09-realtime-notification.md) を一次情報とする。
 
 ## 13. 関連機能
 

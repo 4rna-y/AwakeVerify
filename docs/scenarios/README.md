@@ -17,6 +17,7 @@
 | `face-not-detected-warning.md` | 顔未検出時の警告表示 | 顔未検出通知を受け、動画は止めずに警告表示する。 |
 | `teacher-dashboard-review.md` | 教員による受講状況確認 | 教員がログインし、受講セッション・眠気スコア・停止イベントを確認する。 |
 | `admin-teacher-onboarding.md` | 管理者による教員追加から教員ログインまで | 管理者が教員アカウントを追加し、教員がログイン可能になる。 |
+| `multi-session-dynamic-distribution.md` | 複数受講セッションの動的分散 | 複数Sessionを順序保証付きで分散処理し、停止・障害・水平スケール時の回復を確認する。 |
 
 ## シナリオ記述方針
 

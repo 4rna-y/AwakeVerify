@@ -1,36 +1,34 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AwakeVerify Frontend
 
-## Getting Started
-
-First, run the development server:
+## 開発サーバー
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
 pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+`http://localhost:3000` を開きます。Backend は既定で `http://localhost:5194`、Worker health は既定で `http://localhost:8000/health` を参照します。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## E2E（Playwright）
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+対象シナリオは [`docs/scenarios/student-learning-happy-path.md`](../../docs/scenarios/student-learning-happy-path.md) です。
 
-## Learn More
+1. devcontainer の PostgreSQL、Redis、Azurite、Azure Service Bus Emulator を起動する。
+2. Backend（`http://localhost:5194`）と Worker（`http://localhost:8000/health`）を起動する。
+3. Chromium を初回だけ導入する。
+4. E2E を実行する。
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+pnpm exec playwright install --with-deps chromium
+pnpm test:e2e
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+テスト開始時に Backend health と Worker health を確認します。Worker は起動時に Backend、Service Bus、Blob Storage、Redis への接続を確認してから `/health` を公開するため、この preflight により解析パイプラインの依存サービスが利用可能な状態であることを確認します。テスト本体は、学籍番号でのログイン、受講セッション作成、Web カメラ権限、Backend／Worker の接続確認、WebSocket／SignalR 接続、キャリブレーション開始可能状態までを検証します。
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+接続先を変える場合は、以下を指定できます。
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+E2E_FRONTEND_BASE_URL=http://localhost:3000 \
+E2E_BACKEND_BASE_URL=http://localhost:5194 \
+E2E_WORKER_HEALTH_URL=http://localhost:8000/health \
+pnpm test:e2e
+```

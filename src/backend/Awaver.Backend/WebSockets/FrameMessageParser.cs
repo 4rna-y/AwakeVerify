@@ -1,11 +1,17 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Awaver.Backend.Services;
 
 namespace Awaver.Backend.WebSockets;
 
 public static class FrameMessageParser
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    public const int MaxPayloadBase64Characters = 1_400_000;
+    public const int MaxDecodedJpegBytes = 1_000_000;
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+    };
 
     public static bool TryParse(
         string message,
@@ -34,7 +40,7 @@ public static class FrameMessageParser
             return false;
         }
 
-        if (parsed.SessionId != expectedSessionId)
+        if (parsed.SessionId == Guid.Empty || parsed.SessionId != expectedSessionId)
         {
             error = "sessionId does not match WebSocket path.";
             return false;
@@ -46,33 +52,28 @@ public static class FrameMessageParser
             return false;
         }
 
-        if (parsed.BaseIFrameSequenceNo <= 0)
+
+        if (!string.Equals(parsed.Codec, "image/jpeg", StringComparison.Ordinal))
         {
-            error = "baseIFrameSequenceNo must be positive.";
+            error = "codec must be image/jpeg.";
             return false;
         }
 
-        if (!Enum.TryParse<FrameType>(parsed.FrameType, ignoreCase: false, out var frameType))
+        if (parsed.CapturedAt == default || parsed.CapturedAt.Offset != TimeSpan.Zero)
         {
-            error = "frameType must be I or P.";
+            error = "capturedAt is required and must be a UTC timestamp.";
             return false;
         }
 
-        if (frameType == FrameType.I && parsed.BaseIFrameSequenceNo != parsed.SequenceNo)
+        if (parsed.VideoTimeSec is not { } videoTimeSec || !double.IsFinite(videoTimeSec) || videoTimeSec < 0)
         {
-            error = "I frame baseIFrameSequenceNo must equal sequenceNo.";
+            error = "videoTimeSec is required and must be a finite value greater than or equal to 0.";
             return false;
         }
 
-        if (frameType == FrameType.P && parsed.BaseIFrameSequenceNo >= parsed.SequenceNo)
+        if (string.IsNullOrWhiteSpace(parsed.PayloadBase64) || parsed.PayloadBase64.Length > MaxPayloadBase64Characters || parsed.PayloadBase64.Any(char.IsWhiteSpace))
         {
-            error = "P frame baseIFrameSequenceNo must be lower than sequenceNo.";
-            return false;
-        }
-
-        if (string.IsNullOrWhiteSpace(parsed.Codec))
-        {
-            error = "codec is required.";
+            error = "payloadBase64 exceeds the allowed size or contains invalid whitespace.";
             return false;
         }
 
@@ -87,20 +88,25 @@ public static class FrameMessageParser
             return false;
         }
 
-        if (payload.Length == 0)
+        if (payload.Length == 0 || payload.Length > MaxDecodedJpegBytes)
         {
-            error = "payloadBase64 must not be empty.";
+            error = "decoded JPEG payload exceeds the allowed size.";
+            return false;
+        }
+
+        if (payload.Length < 4 || payload[0] != 0xff || payload[1] != 0xd8 || payload[2] != 0xff || payload[^2] != 0xff || payload[^1] != 0xd9)
+        {
+            error = "payloadBase64 must contain a JPEG image.";
             return false;
         }
 
         frame = new ReceivedFrame(
             parsed.SessionId,
             parsed.SequenceNo,
-            frameType,
-            parsed.BaseIFrameSequenceNo,
             parsed.CapturedAt,
+            videoTimeSec,
             receivedAt,
-            parsed.Codec.Trim(),
+            parsed.Codec,
             payload);
 
         return true;

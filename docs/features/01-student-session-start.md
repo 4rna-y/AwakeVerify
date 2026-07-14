@@ -30,6 +30,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | `studentId` | 受講者の学籍番号 |
+| `videoId` | 受講する動画を識別するID。未指定時は既定値 `default` を記録する。 |
 
 受講者にはパスワードを設定しない。
 
@@ -43,7 +44,8 @@ request:
 
 ```json
 {
-  "studentId": "string"
+  "studentId": "string",
+  "videoId": "string"
 }
 ```
 
@@ -62,10 +64,11 @@ response:
 1. `/` または `/student` で、画面中央にLoginモーダルを表示する。
 2. 初期状態は生徒ログインを主表示とし、学籍番号入力、ログインボタン、教員ログインへ切り替えるLinkTextButtonを表示する。
 3. 受講者が学籍番号を入力する。
-4. `POST /api/sessions` を呼び出す。
-5. レスポンスの `sessionId` を同一ブラウザタブ内の受講中状態として保持する。
-6. `/student/session` へ遷移し、以後のキャリブレーションと動画再生を行う。
-7. 取得した `sessionId` を以下に使用する。
+4. `NEXT_PUBLIC_LESSON_VIDEO_ID` を `videoId` として `POST /api/sessions` へ送信する。未設定時は `default` を送信する。
+5. レスポンスの `sessionId` を同一ブラウザタブ内の受講中状態として保持する。キャリブレーション成功を受信した場合と動画再生中の進捗も同じ状態へ記録するが、再開可否の確定には使用しない。
+6. `/student/session` へ遷移し、以後のキャリブレーションと動画再生を行う。リロード時は保持した `sessionId` とHttpOnly `student_session` Cookieを照合し、成功済みキャリブレーションをBackendから取得して復元する。
+7. `/student/session` の初期照合で未認証・権限なし・Cookieと保持した `sessionId` の不一致を検出した場合は、保持した受講中状態を削除して `/student` へ遷移する。一時的な認証確認失敗はエラーとして表示し、受講者が再試行できるようにする。
+8. 取得した `sessionId` を以下に使用する。
    - WebSocket接続
    - SignalR購読
    - 停止・再開イベント送信
@@ -73,9 +76,9 @@ response:
 
 ### 7.2 バックエンド
 
-1. `studentId` を受け取る。
+1. `studentId` と `videoId` を受け取る。
 2. `students` に存在しない場合は作成する。
-3. `learning_sessions` に新規セッションを作成する。
+3. `learning_sessions` に動画IDを含む新規セッションを作成する。
 4. `sessionId` を返却する。
 
 ## 8. 画面状態
@@ -97,6 +100,7 @@ students
 learning_sessions
 - session_id
 - student_id
+- video_id
 - started_at
 - ended_at nullable
 ```

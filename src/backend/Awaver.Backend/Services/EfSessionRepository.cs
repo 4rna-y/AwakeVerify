@@ -6,9 +6,13 @@ namespace Awaver.Backend.Services;
 
 public sealed class EfSessionRepository(AwaverDbContext dbContext) : ISessionRepository
 {
-    public async Task<SessionStartResult> StartSessionAsync(string studentId, CancellationToken cancellationToken)
+    public Task<SessionStartResult> StartSessionAsync(string studentId, CancellationToken cancellationToken) =>
+        StartSessionAsync(studentId, "default", cancellationToken);
+
+    public async Task<SessionStartResult> StartSessionAsync(string studentId, string videoId, CancellationToken cancellationToken)
     {
         var normalizedStudentId = NormalizeStudentId(studentId);
+        var normalizedVideoId = NormalizeVideoId(videoId);
         var now = DateTimeOffset.UtcNow;
 
         var studentExists = await dbContext.Students
@@ -27,6 +31,7 @@ public sealed class EfSessionRepository(AwaverDbContext dbContext) : ISessionRep
         {
             SessionId = Guid.NewGuid(),
             StudentId = normalizedStudentId,
+            VideoId = normalizedVideoId,
             StartedAt = now,
         };
 
@@ -43,4 +48,5 @@ public sealed class EfSessionRepository(AwaverDbContext dbContext) : ISessionRep
     }
 
     private static string NormalizeStudentId(string studentId) => studentId.Trim();
+    private static string NormalizeVideoId(string videoId) => videoId.Trim();
 }

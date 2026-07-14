@@ -16,7 +16,6 @@ import {
 const apiBaseUrl =
     process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:5194";
 const frameIntervalMs = 200;
-const framesPerIFrame = 5;
 const maxRecentEvents = 20;
 
 type RuntimeState = "idle" | "starting" | "running" | "paused" | "error";
@@ -37,6 +36,7 @@ type DrowsinessScoreEvent = {
     type: "drowsiness_score";
     sessionId: string;
     scoredAt: string;
+    videoTimeSec: number;
     score: number;
     level: DrowsinessLevel;
     perclos: number;
@@ -53,19 +53,27 @@ type TrackingStatusEvent = {
     status: "face_not_detected";
 };
 
-type CalibrationStatus = "calibrating" | "succeeded" | "failed";
-
-type CalibrationStatusEvent = {
-    type: "calibration_status";
-    sessionId: string;
-    updatedAt: string;
-    status: CalibrationStatus;
-    validFrames: number;
-    totalFrames: number;
-    targetFrames: number;
-    earOpen: number | null;
-    earThreshold: number | null;
-};
+type CalibrationStatusEvent =
+    | {
+          type: "calibration_status";
+          sessionId: string;
+          status: "failed";
+          validFrames: number;
+          totalFrames: number;
+          targetFrames: number;
+      }
+    | {
+          type: "calibration_status";
+          sessionId: string;
+          status: "succeeded";
+          validFrames: number;
+          totalFrames: number;
+          targetFrames: number;
+          sourceSequenceNo: number;
+          calibratedAt: string;
+          earOpen: number;
+          earThreshold: number;
+      };
 
 type AnalysisEvent =
     | DrowsinessScoreEvent
@@ -98,7 +106,6 @@ export default function WorkerPipelineTestPage() {
     const resultEventSourceRef = useRef<EventSource | null>(null);
     const frameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const sequenceNoRef = useRef(1);
-    const baseIFrameSequenceNoRef = useRef(1);
     const sendingRef = useRef(false);
     const runningRef = useRef(false);
 
@@ -180,6 +187,7 @@ export default function WorkerPipelineTestPage() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ studentId: activeStudentId.trim() }),
+            credentials: "include",
         });
 
         if (!response.ok) {
@@ -259,7 +267,9 @@ export default function WorkerPipelineTestPage() {
         resultEventSourceRef.current?.close();
         setResultStreamState("connecting");
 
-        const eventSource = new EventSource(buildAnalysisEventsUrl(activeSessionId));
+        const eventSource = new EventSource(buildAnalysisEventsUrl(activeSessionId), {
+                    withCredentials: true,
+                });
         resultEventSourceRef.current = eventSource;
 
         eventSource.addEventListener("open", () => {
@@ -298,7 +308,6 @@ export default function WorkerPipelineTestPage() {
         canvas.height = 480;
         canvasRef.current = canvas;
         sequenceNoRef.current = 1;
-        baseIFrameSequenceNoRef.current = 1;
 
         frameIntervalRef.current = setInterval(() => {
             void captureAndSendFrame(activeSessionId, canvas);
@@ -338,21 +347,16 @@ export default function WorkerPipelineTestPage() {
             }
 
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const videoTimeSec = Number.isFinite(video.currentTime) && video.currentTime >= 0 ? video.currentTime : 0;
             const payloadBase64 = await canvasToBase64(canvas);
             const sequenceNo = sequenceNoRef.current;
-            const isIFrame = (sequenceNo - 1) % framesPerIFrame === 0;
-
-            if (isIFrame) {
-                baseIFrameSequenceNoRef.current = sequenceNo;
-            }
 
             socket.send(
                 JSON.stringify({
                     sessionId: activeSessionId,
                     sequenceNo,
-                    frameType: isIFrame ? "I" : "P",
-                    baseIFrameSequenceNo: baseIFrameSequenceNoRef.current,
                     capturedAt: new Date().toISOString(),
+                    videoTimeSec,
                     codec: "image/jpeg",
                     payloadBase64,
                 }),
@@ -493,11 +497,6 @@ export default function WorkerPipelineTestPage() {
 
                                 {calibration ? (
                                     <>
-                                        {calibration.status === "calibrating" && (
-                                            <p className="text-sm text-muted-foreground">
-                                                顔を正面に向けてください。キャリブレーション中です。
-                                            </p>
-                                        )}
                                         <Metric
                                             label="valid/total frames"
                                             value={`${calibration.validFrames} / ${calibration.totalFrames} (target ${calibration.targetFrames})`}
@@ -506,15 +505,18 @@ export default function WorkerPipelineTestPage() {
                                             <>
                                                 <Metric
                                                     label="EAR_open"
-                                                    value={calibration.earOpen?.toFixed(3) ?? "-"}
+                                                    value={calibration.earOpen.toFixed(3)}
                                                 />
                                                 <Metric
                                                     label="EAR_threshold"
-                                                    value={calibration.earThreshold?.toFixed(3) ?? "-"}
+                                                    value={calibration.earThreshold.toFixed(3)}
+                                                />
+                                                <Metric
+                                                    label="calibratedAt"
+                                                    value={formatTime(calibration.calibratedAt)}
                                                 />
                                             </>
                                         )}
-                                        <Metric label="updatedAt" value={formatTime(calibration.updatedAt)} />
                                     </>
                                 ) : (
                                     <p className="text-sm text-muted-foreground">
@@ -634,7 +636,7 @@ function buildAnalysisEventsUrl(sessionId: string) {
 function parseAnalysisEvent(value: string): AnalysisEvent | null {
     try {
         const parsed = JSON.parse(value) as Partial<AnalysisEvent>;
-        if (parsed.type === "drowsiness_score" && typeof parsed.sessionId === "string") {
+        if (parsed.type === "drowsiness_score" && typeof parsed.sessionId === "string" && typeof parsed.videoTimeSec === "number" && Number.isFinite(parsed.videoTimeSec) && parsed.videoTimeSec >= 0) {
             return parsed as DrowsinessScoreEvent;
         }
         if (parsed.type === "tracking_status" && typeof parsed.sessionId === "string") {

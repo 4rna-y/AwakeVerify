@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "namePrefix": { "value": "awaverperf" },
+    "location": { "value": "japaneast" },
+    "deployWorkloads": { "value": false },
+    "acrSkuName": { "value": "Standard" },
+    "backendImageRepository": { "value": "awaver-backend" },
+    "workerImageRepository": { "value": "awaver-worker" },
+    "imageTag": { "value": "test" },
+    "backendPlanSkuName": { "value": "P1v3" },
+    "backendMinInstances": { "value": 1 },
+    "backendMaxInstances": { "value": 2 },
+    "backendCpuScaleOutThreshold": { "value": 70 },
+    "workerMinReplicas": { "value": 0 },
+    "workerMaxReplicas": { "value": 3 },
+    "workerScaleQueueThreshold": { "value": 10 },
+    "workerSessionConcurrency": { "value": 1 },
+    "workerShutdownTimeoutSeconds": { "value": 30 },
+    "workerTerminationGracePeriodSeconds": { "value": 60 },
+    "workerCpu": { "value": 1 },
+    "workerMemory": { "value": "2Gi" },
+    "serviceBusSkuName": { "value": "Standard" },
+    "serviceBusMaxDeliveryCount": { "value": 10 },
+    "serviceBusLockDuration": { "value": "PT1M" },
+    "frameBlobRetentionDays": { "value": 7 },
+    "frameContainerName": { "value": "frames" },
+    "videoContainerName": { "value": "videos" },
+    "postgresAdministratorLogin": { "value": "awaveradmin" },
+    "postgresDatabaseName": { "value": "awaver" },
+    "postgresSkuName": { "value": "Standard_B1ms" },
+    "postgresSkuTier": { "value": "Burstable" },
+    "postgresStorageSizeGb": { "value": 32 },
+    "postgresBackupRetentionDays": { "value": 7 },
+    "managedRedisSkuName": { "value": "Balanced_B0" },
+    "signalrSkuName": { "value": "Standard_S1" },
+    "signalrCapacity": { "value": 1 },
+    "outboxBatchSize": { "value": 100 },
+    "outboxPollIntervalMs": { "value": 250 },
+    "outboxLeaseSeconds": { "value": 30 },
+    "logAnalyticsRetentionDays": { "value": 30 },
+    "frontendOrigin": { "value": "https://placeholder.invalid" },
+    "tags": {
+      "value": {
+        "workload": "awakeverify",
+        "environment": "nonproduction",
+        "purpose": "distributed-load-test"
+      }
+    }
+  }
+}

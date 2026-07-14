@@ -9,6 +9,7 @@
 - 実装は常に「どの feature / scenario を満たすための変更か」を起点にする。
 - frontend / backend / worker 単位の都合だけで仕様や実装を決めない。
 - 各レイヤーの仕様が衝突する場合は、feature / scenario を優先し、必要なら二次仕様を更新する。
+- `git --no-pager diff --check`コマンドを使用しての差分表示は時間がかかるため避けて他の方法をしようすること。
 
 ## 仕様の優先順位
 

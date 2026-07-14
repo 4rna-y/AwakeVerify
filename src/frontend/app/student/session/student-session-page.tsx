@@ -25,9 +25,12 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { Slider } from "@/components/ui/slider";
 import { Spinner } from "@/components/ui/spinner";
+import { apiFetch, getCurrentPrincipal } from "@/lib/api-client";
 import {
-    StoredStudentSession,
+    markStoredSessionCalibrated,
+    readStoredStudentSession,
     studentSessionStorageKey,
+    updateStoredSessionPlaybackPosition,
 } from "../student-session-storage";
 
 type StudentScreenState =
@@ -48,12 +51,17 @@ type AnalysisStreamState = "idle" | "connecting" | "connected" | "error";
 type DrowsinessLevel = "normal" | "caution" | "warning" | "danger";
 type AutoPauseState = "idle" | "paused" | "recoverable";
 type AutoPauseReason = "drowsiness" | "face_not_detected";
-type PlaybackEventType = "auto_pause" | "resume";
+type PlaybackEventType =
+    | "manual_pause"
+    | "auto_pause"
+    | "resume"
+    | "completed";
 
 type DrowsinessScoreEvent = {
     type: "drowsiness_score";
     sessionId: string;
     scoredAt: string;
+    videoTimeSec: number;
     score: number;
     level: DrowsinessLevel;
     perclos: number;
@@ -70,27 +78,43 @@ type TrackingStatusEvent = {
     status: "face_not_detected";
 };
 
-type CalibrationStatusEvent = {
-    type: "calibration_status";
-    sessionId: string;
-    updatedAt: string;
-    status: "calibrating" | "succeeded" | "failed";
-    validFrames: number;
-    totalFrames: number;
-    targetFrames: number;
-    earOpen: number | null;
-    earThreshold: number | null;
-};
+type CalibrationStatusEvent =
+    | {
+          type: "calibration_status";
+          sessionId: string;
+          status: "failed";
+          validFrames: number;
+          totalFrames: number;
+          targetFrames: number;
+      }
+    | {
+          type: "calibration_status";
+          sessionId: string;
+          status: "succeeded";
+          validFrames: number;
+          totalFrames: number;
+          targetFrames: number;
+          sourceSequenceNo: number;
+          calibratedAt: string;
+          earOpen: number;
+          earThreshold: number;
+      };
 
 type AnalysisEvent =
     | DrowsinessScoreEvent
     | TrackingStatusEvent
     | CalibrationStatusEvent;
 
+type PersistedCalibration = Extract<
+    CalibrationStatusEvent,
+    { status: "succeeded" }
+>;
+
 const apiBaseUrl =
     process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:5194";
 const frameIntervalMs = 200;
-const framesPerIFrame = 5;
+const calibrationDurationMs = 5_000;
+const calibrationProgressIntervalMs = 100;
 const fallbackLessonDurationSec = 300;
 const lessonVideoUrl =
     process.env.NEXT_PUBLIC_LESSON_VIDEO_URL ??
@@ -109,7 +133,7 @@ const controlsInactivityTimeoutMs = 3000;
 
 export default function StudentSessionPage() {
     const router = useRouter();
-    const [studentId, setStudentId] = useState<string | null>(null);
+
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [screenState, setScreenState] = useState<StudentScreenState>("camera_permission_required");
     const [message, setMessage] = useState<string | null>(null);
@@ -123,9 +147,10 @@ export default function StudentSessionPage() {
         fallbackLessonDurationSec,
     );
     const [isWebSocketConnecting, setIsWebSocketConnecting] = useState(false);
-    const [isWebSocketConnected, setIsWebSocketConnected] = useState(false);
     const [webSocketConnectAttempt, setWebSocketConnectAttempt] = useState(0);
     const [isWebSocketErrorOpen, setIsWebSocketErrorOpen] = useState(false);
+    const [isResultStreamErrorOpen, setIsResultStreamErrorOpen] =
+        useState(false);
     const [serviceCheckState, setServiceCheckState] =
         useState<ServiceCheckState>("idle");
     const [serviceCheckMessage, setServiceCheckMessage] = useState("");
@@ -169,26 +194,55 @@ export default function StudentSessionPage() {
     const webSocketConnectionIdRef = useRef(0);
     const activeSessionIdRef = useRef<string | null>(null);
     const sequenceNoRef = useRef(1);
-    const baseIFrameSequenceNoRef = useRef(1);
+    const frameCaptureGenerationRef = useRef(0);
     const sendingRef = useRef(false);
     const isPlayingRef = useRef(false);
     const isAnalysisActiveRef = useRef(false);
+    const screenStateRef = useRef<StudentScreenState>(
+        "camera_permission_required",
+    );
+    const resultStreamStateRef = useRef<AnalysisStreamState>("idle");
+    const calibrationActiveRef = useRef(false);
+    const isCalibrationDoneRef = useRef(false);
+    const restoredPlaybackPositionRef = useRef<number | null>(null);
+    const playbackPositionRef = useRef(0);
+    const lessonCompletedRef = useRef(false);
+    const webSocketRecoveryPlaybackRef = useRef(false);
     const autoPauseStateRef = useRef<AutoPauseState>("idle");
     const autoPauseReasonRef = useRef<AutoPauseReason | null>(null);
     const autoPauseEventSentRef = useRef(false);
     const pendingResumePlaybackEventRef = useRef(false);
+    const pendingManualResumePlaybackEventRef = useRef(false);
     const pendingPlaybackAfterSocketOpenRef = useRef(false);
     const pendingAnalysisAfterSocketOpenRef = useRef(false);
+    const pendingFrameMessagesRef = useRef(new Map<number, { payload: string; retries: number }>());
     const lessonVideoFileName = getLessonVideoFileName(lessonVideoUrl);
 
     useEffect(() => {
+        screenStateRef.current = screenState;
+    }, [screenState]);
+
+    useEffect(() => {
+        resultStreamStateRef.current = resultStreamState;
+    }, [resultStreamState]);
+
+    useEffect(() => {
+        playbackPositionRef.current = playbackPosition;
+    }, [playbackPosition]);
+
+    useEffect(() => {
+        const pendingFrameMessages = pendingFrameMessagesRef.current;
         return () => {
+            webSocketConnectionIdRef.current += 1;
             stopFrameSending();
             stopPlaybackTimer();
             stopCalibrationTimer();
             clearWebSocketRetryTimer();
             socketRef.current?.close();
-            void resultConnectionRef.current?.stop();
+            pendingFrameMessages.clear();
+            const resultConnection = resultConnectionRef.current;
+            resultConnectionRef.current = null;
+            void resultConnection?.stop();
             streamRef.current?.getTracks().forEach((track) => track.stop());
         };
     }, []);
@@ -287,7 +341,57 @@ export default function StudentSessionPage() {
                 return;
             }
 
-            setStudentId(storedSession.studentId);
+            try {
+                const { response, principal } = await getCurrentPrincipal();
+                if (!isActive) return;
+
+                const sessionDoesNotMatchPrincipal =
+                    response.ok &&
+                    (principal?.role !== "student_session" ||
+                        (principal.studentSessionId ?? principal.principalId) !==
+                            storedSession.sessionId);
+
+                if (
+                    response.status === 401 ||
+                    response.status === 403 ||
+                    sessionDoesNotMatchPrincipal
+                ) {
+                    sessionStorage.removeItem(studentSessionStorageKey);
+                    router.replace("/student");
+                    return;
+                }
+
+                if (!response.ok) {
+                    setScreenState("error");
+                    setMessage("認証状態を確認できませんでした。接続を確認して再試行してください。");
+                    return;
+                }
+            } catch {
+                setScreenState("error");
+                setMessage("認証状態を確認できませんでした。接続を確認して再試行してください。");
+                return;
+            }
+
+            let persistedCalibration: PersistedCalibration | null;
+            try {
+                persistedCalibration = await getPersistedCalibration(
+                    storedSession.sessionId,
+                );
+                if (!isActive) return;
+            } catch (error) {
+                setScreenState("error");
+                setMessage(
+                    error instanceof Error
+                        ? error.message
+                        : "キャリブレーション状態を確認できませんでした。",
+                );
+                return;
+            }
+
+            restoredPlaybackPositionRef.current =
+                storedSession.playbackPositionSec ?? null;
+            playbackPositionRef.current = storedSession.playbackPositionSec ?? 0;
+            setPlaybackPosition(storedSession.playbackPositionSec ?? 0);
             setSessionId(storedSession.sessionId);
             setScreenState("camera_permission_required");
             setMessage("カメラ権限を許可してください。");
@@ -319,14 +423,30 @@ export default function StudentSessionPage() {
                 }
 
                 setIsLoadingOpen(false);
+                if (persistedCalibration) {
+                    calibrationActiveRef.current = false;
+                    isCalibrationDoneRef.current = true;
+                    setCalibrationStatus(persistedCalibration);
+                    setCalibrationProgress(100);
+                    setIsCalibrationDone(true);
+                    setIsCalibrationOpen(false);
+                    setScreenState("ready");
+                    markStoredSessionCalibrated(storedSession.sessionId);
+                    connectFrameSocketWithRetry(
+                        storedSession.sessionId,
+                        stream,
+                        false,
+                    );
+                } else {
+                    setIsCalibrationOpen(true);
+                    setScreenState("calibration_ready");
+                    connectFrameSocketWithRetry(
+                        storedSession.sessionId,
+                        stream,
+                        false,
+                    );
+                }
                 connectResultStream(storedSession.sessionId);
-                setIsCalibrationOpen(true);
-                setScreenState("calibration_ready");
-                connectFrameSocketWithRetry(
-                    storedSession.sessionId,
-                    stream,
-                    false,
-                );
             } catch (error) {
                 const errorMessage =
                     error instanceof Error
@@ -436,16 +556,26 @@ export default function StudentSessionPage() {
     }
 
     function connectResultStream(activeSessionId: string) {
-        void resultConnectionRef.current?.stop();
+        const previousConnection = resultConnectionRef.current;
+        resultConnectionRef.current = null;
+        void previousConnection?.stop();
+        resultStreamStateRef.current = "connecting";
         setResultStreamState("connecting");
 
         const connection = new signalR.HubConnectionBuilder()
-            .withUrl(buildAnalysisEventsHubUrl())
+            .withUrl(buildAnalysisEventsHubUrl(), { withCredentials: true })
             .withAutomaticReconnect()
             .build();
         resultConnectionRef.current = connection;
 
+        const isCurrentConnection = () =>
+            resultConnectionRef.current === connection;
+
         connection.on("ReceiveAnalysisEvent", (payload: unknown) => {
+            if (!isCurrentConnection()) {
+                return;
+            }
+
             const analysisEvent = parseAnalysisEvent(payload);
             if (!analysisEvent || analysisEvent.sessionId !== activeSessionId) {
                 return;
@@ -455,37 +585,138 @@ export default function StudentSessionPage() {
         });
 
         connection.onreconnecting(() => {
+            if (!isCurrentConnection()) {
+                return;
+            }
+
+            resultStreamStateRef.current = "connecting";
             setResultStreamState("connecting");
+            pauseForResultStreamReconnect();
         });
 
         connection.onreconnected(() => {
+            if (!isCurrentConnection()) {
+                return;
+            }
+
             void connection
                 .invoke("JoinSession", activeSessionId)
-                .then(() => setResultStreamState("connected"))
-                .catch(() => setResultStreamState("error"));
+                .then(() => {
+                    if (!isCurrentConnection()) {
+                        return;
+                    }
+
+                    resultStreamStateRef.current = "connected";
+                    setResultStreamState("connected");
+                    if (pendingAnalysisAfterSocketOpenRef.current) {
+                        pendingAnalysisAfterSocketOpenRef.current = false;
+                        const stream = streamRef.current;
+                        if (stream && socketRef.current?.readyState === WebSocket.OPEN) {
+                            startFrameSending(activeSessionId, stream);
+                        }
+                    }
+                })
+                .catch(() => {
+                    if (!isCurrentConnection()) {
+                        return;
+                    }
+
+                    handleResultStreamFailure(
+                        "解析結果イベントストリームの再参加に失敗しました。Backend の起動状態を確認してください。",
+                    );
+                });
         });
 
         connection.onclose(() => {
-            setResultStreamState("error");
-            if (screenState === "calibrating" || screenState === "streaming") {
-                setMessage(
-                    "解析結果イベントストリームでエラーが発生しました。Backend の起動状態を確認してください。",
-                );
+            if (!isCurrentConnection()) {
+                return;
             }
+
+            handleResultStreamFailure(
+                "解析結果イベントストリームでエラーが発生しました。Backend の起動状態を確認して再接続してください。",
+            );
         });
 
-        connection
+        void connection
             .start()
             .then(() => connection.invoke("JoinSession", activeSessionId))
             .then(() => {
+                if (!isCurrentConnection()) {
+                    return;
+                }
+
+                resultStreamStateRef.current = "connected";
                 setResultStreamState("connected");
             })
             .catch(() => {
-                setResultStreamState("error");
-                setMessage(
-                    "解析結果イベントストリームへの接続に失敗しました。Backend の起動状態を確認してください。",
+                if (!isCurrentConnection()) {
+                    return;
+                }
+
+                handleResultStreamFailure(
+                    "解析結果イベントストリームへの接続に失敗しました。Backend の起動状態を確認して再接続してください。",
                 );
             });
+    }
+
+    function handleResultStreamFailure(failureMessage: string) {
+        const wasCalibrating =
+            calibrationActiveRef.current ||
+            screenStateRef.current === "calibrating";
+        const wasPlaying = isPlayingRef.current;
+
+        resultStreamStateRef.current = "error";
+        setResultStreamState("error");
+        webSocketRecoveryPlaybackRef.current = false;
+        pendingPlaybackAfterSocketOpenRef.current = false;
+        pendingAnalysisAfterSocketOpenRef.current = false;
+        stopFrameSending();
+
+        if (wasPlaying) {
+            isPlayingRef.current = false;
+            setIsPlaying(false);
+            lessonVideoRef.current?.pause();
+            stopPlaybackTimer();
+        }
+
+        if (wasCalibrating && !isCalibrationDoneRef.current) {
+            calibrationActiveRef.current = false;
+            stopCalibrationTimer();
+            setScreenState("calibration_ready");
+        } else if (wasPlaying) {
+            setScreenState("paused");
+        }
+
+        setMessage(failureMessage);
+        setIsResultStreamErrorOpen(true);
+    }
+
+    function pauseForResultStreamReconnect() {
+        const wasPlaying = isPlayingRef.current;
+        webSocketRecoveryPlaybackRef.current = false;
+        pendingPlaybackAfterSocketOpenRef.current = false;
+        pendingAnalysisAfterSocketOpenRef.current = isAnalysisActiveRef.current;
+        stopFrameSending();
+        if (wasPlaying) {
+            isPlayingRef.current = false;
+            setIsPlaying(false);
+            lessonVideoRef.current?.pause();
+            stopPlaybackTimer();
+            setScreenState("paused");
+        }
+        setMessage("解析結果イベントストリームを再接続しています。再接続と再参加が完了するまで受講を停止します。");
+    }
+
+    function retryResultStream() {
+        const activeSessionId = activeSessionIdRef.current;
+
+        if (!activeSessionId) {
+            setMessage("受講セッションが初期化されていません。");
+            return;
+        }
+
+        setIsResultStreamErrorOpen(false);
+        connectResultStream(activeSessionId);
     }
 
     function handleAnalysisEvent(analysisEvent: AnalysisEvent) {
@@ -533,6 +764,8 @@ export default function StudentSessionPage() {
         }
 
         if (event.status === "failed") {
+            calibrationActiveRef.current = false;
+            stopCalibrationTimer();
             stopFrameSending();
             setScreenState("calibration_ready");
             setMessage(
@@ -582,7 +815,10 @@ export default function StudentSessionPage() {
 
         if (lessonVideo) {
             lessonVideo.pause();
-            setPlaybackPosition(Math.floor(rewindLessonVideo(lessonVideo)));
+            const rewoundPosition = Math.floor(rewindLessonVideo(lessonVideo));
+            playbackPositionRef.current = rewoundPosition;
+            setPlaybackPosition(rewoundPosition);
+            persistPlaybackPosition(rewoundPosition);
         }
 
         stopPlaybackTimer();
@@ -644,6 +880,8 @@ export default function StudentSessionPage() {
         setLatestTracking(null);
         setMessage(null);
         setScreenState("calibrating");
+        calibrationActiveRef.current = true;
+        startCalibrationTimer();
 
         if (socketRef.current?.readyState === WebSocket.OPEN) {
             startFrameSending(activeSessionId, stream);
@@ -655,12 +893,41 @@ export default function StudentSessionPage() {
     }
 
     function completeCalibration() {
+        if (isCalibrationDoneRef.current) {
+            return;
+        }
+
+        calibrationActiveRef.current = false;
+        isCalibrationDoneRef.current = true;
         stopCalibrationTimer();
         setCalibrationProgress(100);
         setIsCalibrationOpen(false);
         setIsCalibrationDone(true);
         setScreenState("ready");
-        startPlayback();
+        const activeSessionId = activeSessionIdRef.current;
+        if (activeSessionId) {
+            markStoredSessionCalibrated(activeSessionId);
+        }
+    }
+
+    function startCalibrationTimer() {
+        stopCalibrationTimer();
+        const startedAt = Date.now();
+
+        calibrationIntervalRef.current = setInterval(() => {
+            const elapsedMs = Date.now() - startedAt;
+            // 100% is reserved for a successful Worker notification. Reaching the
+            // expected capture duration alone must not allow lesson playback.
+            const progress = Math.min(
+                (elapsedMs / calibrationDurationMs) * 100,
+                99,
+            );
+            setCalibrationProgress(progress);
+
+            if (elapsedMs >= calibrationDurationMs) {
+                stopCalibrationTimer();
+            }
+        }, calibrationProgressIntervalMs);
     }
 
     function stopCalibrationTimer() {
@@ -671,7 +938,21 @@ export default function StudentSessionPage() {
     }
 
     function startPlayback() {
-        if (screenState === "ended") {
+        if (screenStateRef.current === "ended") {
+            return;
+        }
+
+        if (!isCalibrationDoneRef.current) {
+            setMessage(
+                "キャリブレーション成功後に動画教材を再生できます。",
+            );
+            return;
+        }
+
+        if (resultStreamStateRef.current !== "connected") {
+            setMessage(
+                "解析結果イベントストリームの接続完了後に動画を再生できます。",
+            );
             return;
         }
 
@@ -720,10 +1001,27 @@ export default function StudentSessionPage() {
         activeSessionId: string,
         stream: MediaStream,
     ) {
+        if (resultStreamStateRef.current !== "connected") {
+            pendingPlaybackAfterSocketOpenRef.current = false;
+            webSocketRecoveryPlaybackRef.current = true;
+            isPlayingRef.current = false;
+            setIsPlaying(false);
+            lessonVideoRef.current?.pause();
+            stopPlaybackTimer();
+            setScreenState("paused");
+            setMessage(
+                "解析結果イベントストリームが接続されるまで動画を再生できません。",
+            );
+            return;
+        }
+
+        webSocketRecoveryPlaybackRef.current = false;
         isPlayingRef.current = true;
         setIsPlaying(true);
         setScreenState("streaming");
+        setMessage(null);
         if (lessonVideoRef.current) {
+            restoreLessonPlaybackPosition(lessonVideoRef.current);
             safelyPlayVideo(lessonVideoRef.current);
         }
         startPlaybackTimer();
@@ -743,7 +1041,16 @@ export default function StudentSessionPage() {
     }
 
     function pausePlayback() {
+        if (!isPlayingRef.current) {
+            return;
+        }
+
+        const videoTimeSec = lessonVideoRef.current
+            ? getCurrentVideoTime(lessonVideoRef.current)
+            : playbackPositionRef.current;
+
         webSocketConnectionIdRef.current += 1;
+        webSocketRecoveryPlaybackRef.current = false;
         pendingPlaybackAfterSocketOpenRef.current = false;
         pendingAnalysisAfterSocketOpenRef.current = false;
         clearWebSocketRetryTimer();
@@ -752,8 +1059,15 @@ export default function StudentSessionPage() {
         setIsPlaying(false);
         setScreenState("paused");
         lessonVideoRef.current?.pause();
+        persistPlaybackPosition(videoTimeSec);
         stopPlaybackTimer();
         stopFrameSending();
+        pendingManualResumePlaybackEventRef.current = true;
+        void sendPlaybackEvent(
+            activeSessionIdRef.current,
+            "manual_pause",
+            videoTimeSec,
+        );
     }
 
     function togglePlayback() {
@@ -768,27 +1082,21 @@ export default function StudentSessionPage() {
     function startPlaybackTimer() {
         stopPlaybackTimer();
         playbackIntervalRef.current = setInterval(() => {
-            setPlaybackPosition((current) => {
-                const video = lessonVideoRef.current;
-                const duration = getLessonDuration(video, lessonDurationSec);
-                const nextPosition = video
-                    ? Math.floor(video.currentTime)
-                    : current + 1;
+            const video = lessonVideoRef.current;
+            const duration = getLessonDuration(video, lessonDurationSec);
+            const nextPosition = video
+                ? Math.floor(getCurrentVideoTime(video))
+                : playbackPositionRef.current + 1;
+            const finalPosition = Math.min(nextPosition, duration);
 
-                const hasEnded = video ? video.ended : nextPosition >= duration;
+            const hasEnded = video ? video.ended : nextPosition >= duration;
+            if (hasEnded) {
+                completeLesson(finalPosition);
+                return;
+            }
 
-                if (hasEnded) {
-                    stopPlaybackTimer();
-                    stopFrameSending();
-                    isPlayingRef.current = false;
-                    setIsPlaying(false);
-                    video?.pause();
-                    setMessage("おつかれさまでした。動画教材の受講が完了しました。");
-                    setScreenState("ended");
-                    return duration;
-                }
-                return Math.min(nextPosition, duration);
-            });
+            playbackPositionRef.current = finalPosition;
+            setPlaybackPosition(finalPosition);
         }, 1000);
     }
 
@@ -800,16 +1108,88 @@ export default function StudentSessionPage() {
             fallbackLessonDurationSec,
         );
         setLessonDurationSec(duration);
+        restoreLessonPlaybackPosition(event.currentTarget);
+    }
+
+    function handleLessonTimeUpdate(event: SyntheticEvent<HTMLVideoElement>) {
+        const position = Math.floor(getCurrentVideoTime(event.currentTarget));
+        playbackPositionRef.current = position;
+        setPlaybackPosition(position);
+        persistPlaybackPosition(position);
+    }
+
+    function handleLessonPlaying(event: SyntheticEvent<HTMLVideoElement>) {
+        if (!pendingManualResumePlaybackEventRef.current) {
+            return;
+        }
+
+        pendingManualResumePlaybackEventRef.current = false;
+        void sendPlaybackEvent(
+            activeSessionIdRef.current,
+            "resume",
+            getCurrentVideoTime(event.currentTarget),
+        );
     }
 
     function handleLessonEnded() {
-        stopPlaybackTimer();
-        stopFrameSending();
+        const video = lessonVideoRef.current;
+        completeLesson(
+            video ? getCurrentVideoTime(video) : lessonDurationSec,
+        );
+    }
+
+    function completeLesson(finalPosition: number) {
+        if (lessonCompletedRef.current) {
+            return;
+        }
+
+        lessonCompletedRef.current = true;
+        const completedPosition = Math.max(0, Math.floor(finalPosition));
+        pendingResumePlaybackEventRef.current = false;
+        pendingManualResumePlaybackEventRef.current = false;
+        webSocketRecoveryPlaybackRef.current = false;
+        pendingPlaybackAfterSocketOpenRef.current = false;
+        pendingAnalysisAfterSocketOpenRef.current = false;
         isPlayingRef.current = false;
         setIsPlaying(false);
-        setPlaybackPosition(lessonDurationSec);
+        lessonVideoRef.current?.pause();
+        stopPlaybackTimer();
+        stopFrameSending();
+        playbackPositionRef.current = completedPosition;
+        setPlaybackPosition(completedPosition);
+        persistPlaybackPosition(completedPosition);
         setMessage("おつかれさまでした。動画教材の受講が完了しました。");
         setScreenState("ended");
+        void sendPlaybackEvent(
+            activeSessionIdRef.current,
+            "completed",
+            completedPosition,
+        );
+    }
+
+    function restoreLessonPlaybackPosition(video: HTMLVideoElement) {
+        const restoredPosition = restoredPlaybackPositionRef.current;
+        if (restoredPosition === null) {
+            return;
+        }
+
+        const duration = Number.isFinite(video.duration) && video.duration > 0
+            ? video.duration
+            : null;
+        const position = duration === null
+            ? restoredPosition
+            : Math.min(restoredPosition, duration);
+        video.currentTime = position;
+        playbackPositionRef.current = Math.floor(position);
+        setPlaybackPosition(Math.floor(position));
+        restoredPlaybackPositionRef.current = null;
+    }
+
+    function persistPlaybackPosition(position: number) {
+        const activeSessionId = activeSessionIdRef.current;
+        if (activeSessionId) {
+            updateStoredSessionPlaybackPosition(activeSessionId, position);
+        }
     }
 
     function stopPlaybackTimer() {
@@ -824,10 +1204,13 @@ export default function StudentSessionPage() {
         stream: MediaStream,
         startPlaybackOnOpen: boolean,
     ) {
-        pendingPlaybackAfterSocketOpenRef.current = startPlaybackOnOpen;
+        pendingPlaybackAfterSocketOpenRef.current =
+            startPlaybackOnOpen || pendingPlaybackAfterSocketOpenRef.current;
+        if (startPlaybackOnOpen) {
+            webSocketRecoveryPlaybackRef.current = true;
+        }
 
         if (socketRef.current?.readyState === WebSocket.OPEN) {
-            setIsWebSocketConnected(true);
             if (pendingAnalysisAfterSocketOpenRef.current) {
                 pendingAnalysisAfterSocketOpenRef.current = false;
                 startFrameSending(activeSessionId, stream);
@@ -867,7 +1250,6 @@ export default function StudentSessionPage() {
         clearWebSocketRetryTimer();
         socketRef.current?.close();
         socketRef.current = null;
-        setIsWebSocketConnected(false);
         stopFrameSending();
         setIsWebSocketConnecting(true);
         setWebSocketConnectAttempt(attempt);
@@ -878,21 +1260,29 @@ export default function StudentSessionPage() {
         const wsUrl = buildFrameWebSocketUrl(activeSessionId);
         const socket = new WebSocket(wsUrl);
         socketRef.current = socket;
-        let settled = false;
+        let hasOpened = false;
+        let nextRetryAttempt = attempt;
 
-        socket.addEventListener("open", () => {
-            if (connectionId !== webSocketConnectionIdRef.current) {
+            socket.addEventListener("open", () => {
+            if (
+                connectionId !== webSocketConnectionIdRef.current ||
+                socketRef.current !== socket
+            ) {
                 socket.close();
                 return;
             }
 
-            settled = true;
+            hasOpened = true;
+            nextRetryAttempt = 1;
             setIsWebSocketConnecting(false);
-            setIsWebSocketConnected(true);
             setWebSocketConnectAttempt(0);
+            pendingFrameMessagesRef.current.clear();
 
             if (pendingAnalysisAfterSocketOpenRef.current) {
                 pendingAnalysisAfterSocketOpenRef.current = false;
+                if (calibrationActiveRef.current) {
+                    setScreenState("calibrating");
+                }
                 startFrameSending(activeSessionId, stream);
             }
 
@@ -903,24 +1293,82 @@ export default function StudentSessionPage() {
         });
 
         socket.addEventListener("close", () => {
-            setIsWebSocketConnected(false);
-            stopFrameSending();
-            if (!settled && connectionId === webSocketConnectionIdRef.current) {
-                scheduleFrameSocketRetry(
-                    activeSessionId,
-                    stream,
-                    attempt,
-                    connectionId,
-                    showConnectingState,
-                );
+            if (
+                connectionId !== webSocketConnectionIdRef.current ||
+                socketRef.current !== socket
+            ) {
+                return;
             }
+
+            if (hasOpened) {
+                handleUnexpectedFrameSocketClose();
+            }
+            stopFrameSending();
+
+            scheduleFrameSocketRetry(
+                activeSessionId,
+                stream,
+                hasOpened ? nextRetryAttempt : attempt,
+                connectionId,
+                showConnectingState || hasOpened,
+            );
         });
 
         socket.addEventListener("error", () => {
-            if (!settled) {
+            if (!hasOpened) {
                 socket.close();
             }
         });
+
+        socket.addEventListener("message", (event) => {
+            if (socketRef.current !== socket || typeof event.data !== "string") return;
+            try {
+                const message = JSON.parse(event.data) as { type?: unknown; sequenceNo?: unknown; retryable?: unknown };
+                if (typeof message.sequenceNo !== "number") return;
+                if (message.type === "frame_ack") {
+                    pendingFrameMessagesRef.current.delete(message.sequenceNo);
+                    return;
+                }
+                if (message.type !== "frame_nack") return;
+                const pending = pendingFrameMessagesRef.current.get(message.sequenceNo);
+                if (!pending || message.retryable !== true || socket.readyState !== WebSocket.OPEN) return;
+                if (pending.retries >= 3) {
+                    pendingFrameMessagesRef.current.delete(message.sequenceNo);
+                    setMessage("フレームの再送に失敗しました。接続を確認して再試行してください。");
+                    return;
+                }
+                pending.retries += 1;
+                socket.send(pending.payload);
+            } catch {
+                // Non-protocol server messages do not affect frame sending.
+            }
+        });
+    }
+
+    function handleUnexpectedFrameSocketClose() {
+        const wasPlaying = isPlayingRef.current;
+        const wasAnalyzing = isAnalysisActiveRef.current;
+        const wasCalibrating =
+            calibrationActiveRef.current ||
+            screenStateRef.current === "calibrating";
+
+        webSocketRecoveryPlaybackRef.current = wasPlaying;
+        pendingPlaybackAfterSocketOpenRef.current = wasPlaying;
+        pendingAnalysisAfterSocketOpenRef.current = wasAnalyzing;
+
+        if (wasPlaying) {
+            isPlayingRef.current = false;
+            setIsPlaying(false);
+            lessonVideoRef.current?.pause();
+            stopPlaybackTimer();
+            setScreenState("ws_connecting");
+        } else if (wasCalibrating) {
+            setScreenState("ws_connecting");
+        }
+
+        setMessage(
+            "WebSocketが切断されました。動画と解析を停止して再接続しています。",
+        );
     }
 
     function scheduleFrameSocketRetry(
@@ -932,14 +1380,24 @@ export default function StudentSessionPage() {
     ) {
         if (attempt >= maxWebSocketConnectAttempts) {
             setIsWebSocketConnecting(false);
-            setIsWebSocketConnected(false);
             setWebSocketConnectAttempt(0);
             isPlayingRef.current = false;
             setIsPlaying(false);
+            lessonVideoRef.current?.pause();
             stopPlaybackTimer();
             stopFrameSending();
+            pendingPlaybackAfterSocketOpenRef.current = false;
             pendingAnalysisAfterSocketOpenRef.current = false;
-            setScreenState("error");
+            const wasCalibrating =
+                calibrationActiveRef.current ||
+                screenStateRef.current === "calibrating" ||
+                screenStateRef.current === "ws_connecting" &&
+                    !isCalibrationDoneRef.current;
+            calibrationActiveRef.current = false;
+            if (wasCalibrating) {
+                stopCalibrationTimer();
+            }
+            setScreenState(wasCalibrating ? "calibration_ready" : "error");
             setMessage(
                 "WebSocket 接続に失敗しました。ネットワークまたはバックエンドの起動状態を確認してください。",
             );
@@ -949,6 +1407,7 @@ export default function StudentSessionPage() {
 
         const delayMs = webSocketBackoffBaseMs * 2 ** (attempt - 1);
         webSocketRetryTimeoutRef.current = setTimeout(() => {
+            webSocketRetryTimeoutRef.current = null;
             attemptFrameSocketConnection(
                 activeSessionId,
                 stream,
@@ -957,6 +1416,39 @@ export default function StudentSessionPage() {
                 showConnectingState,
             );
         }, delayMs);
+    }
+
+    function retryFrameSocketConnection() {
+        const activeSessionId = activeSessionIdRef.current;
+        const stream = streamRef.current;
+
+        if (!activeSessionId || !stream) {
+            setMessage("受講セッションまたはカメラ映像が初期化されていません。");
+            return;
+        }
+
+        setIsWebSocketErrorOpen(false);
+        if (!isCalibrationDoneRef.current) {
+            if (calibrationStatus?.status === "failed") {
+                startCalibration();
+                return;
+            }
+
+            setScreenState("calibration_ready");
+            connectFrameSocketWithRetry(activeSessionId, stream, false);
+            return;
+        }
+
+        const shouldResumePlayback =
+            webSocketRecoveryPlaybackRef.current &&
+            autoPauseStateRef.current === "idle";
+        pendingAnalysisAfterSocketOpenRef.current =
+            autoPauseStateRef.current !== "idle";
+        connectFrameSocketWithRetry(
+            activeSessionId,
+            stream,
+            shouldResumePlayback,
+        );
     }
 
     function clearWebSocketRetryTimer() {
@@ -997,16 +1489,16 @@ export default function StudentSessionPage() {
         canvas.height = height;
         canvasRef.current = canvas;
 
-        sequenceNoRef.current = 1;
-        baseIFrameSequenceNoRef.current = 1;
+        const captureGeneration = frameCaptureGenerationRef.current;
 
         frameIntervalRef.current = setInterval(() => {
-            void captureAndSendFrame(activeSessionId, canvas);
+            void captureAndSendFrame(activeSessionId, canvas, captureGeneration);
         }, frameIntervalMs);
     }
 
     function stopFrameSending() {
         isAnalysisActiveRef.current = false;
+        frameCaptureGenerationRef.current += 1;
         if (frameIntervalRef.current) {
             clearInterval(frameIntervalRef.current);
             frameIntervalRef.current = null;
@@ -1016,11 +1508,13 @@ export default function StudentSessionPage() {
     async function captureAndSendFrame(
         activeSessionId: string,
         canvas: HTMLCanvasElement,
+        captureGeneration: number,
     ) {
         const socket = socketRef.current;
         const video = cameraCaptureVideoRef.current;
 
         if (
+            captureGeneration !== frameCaptureGenerationRef.current ||
             sendingRef.current ||
             !isAnalysisActiveRef.current ||
             !socket ||
@@ -1039,25 +1533,33 @@ export default function StudentSessionPage() {
             }
 
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const lessonVideo = lessonVideoRef.current;
+            const videoTimeSec = lessonVideo ? getCurrentVideoTime(lessonVideo) : playbackPositionRef.current;
             const payloadBase64 = await canvasToBase64(canvas);
-            const sequenceNo = sequenceNoRef.current;
-            const isIFrame = (sequenceNo - 1) % framesPerIFrame === 0;
-
-            if (isIFrame) {
-                baseIFrameSequenceNoRef.current = sequenceNo;
+            if (
+                captureGeneration !== frameCaptureGenerationRef.current ||
+                !isAnalysisActiveRef.current ||
+                socketRef.current !== socket ||
+                socket.readyState !== WebSocket.OPEN
+            ) {
+                return;
             }
 
-            socket.send(
-                JSON.stringify({
-                    sessionId: activeSessionId,
-                    sequenceNo,
-                    frameType: isIFrame ? "I" : "P",
-                    baseIFrameSequenceNo: baseIFrameSequenceNoRef.current,
-                    capturedAt: new Date().toISOString(),
-                    codec: "image/jpeg",
-                    payloadBase64,
-                }),
-            );
+            const sequenceNo = sequenceNoRef.current;
+            const serializedFrame = JSON.stringify({
+                sessionId: activeSessionId,
+                sequenceNo,
+                capturedAt: new Date().toISOString(),
+                videoTimeSec,
+                codec: "image/jpeg",
+                payloadBase64,
+            });
+            socket.send(serializedFrame);
+            pendingFrameMessagesRef.current.set(sequenceNo, { payload: serializedFrame, retries: 0 });
+            if (pendingFrameMessagesRef.current.size > 50) {
+                const oldestSequenceNo = pendingFrameMessagesRef.current.keys().next().value;
+                if (typeof oldestSequenceNo === "number") pendingFrameMessagesRef.current.delete(oldestSequenceNo);
+            }
 
             sequenceNoRef.current = sequenceNo + 1;
         } catch (error) {
@@ -1115,6 +1617,13 @@ export default function StudentSessionPage() {
 
     const isCameraSending =
         isPlaying || screenState === "calibrating" || autoPauseState !== "idle";
+    const canStartLessonFromCenter =
+        screenState === "ready" &&
+        isCalibrationDone &&
+        !isCalibrationOpen &&
+        !isWebSocketConnecting &&
+        resultStreamState === "connected" &&
+        autoPauseState === "idle";
     const controlsVisibilityClass = areControlsVisible
         ? "opacity-100"
         : "pointer-events-none opacity-0";
@@ -1128,6 +1637,8 @@ export default function StudentSessionPage() {
                 playsInline
                 preload="metadata"
                 onLoadedMetadata={handleLessonMetadataLoaded}
+                onTimeUpdate={handleLessonTimeUpdate}
+                onPlaying={handleLessonPlaying}
                 onEnded={handleLessonEnded}
             />
             <video
@@ -1137,6 +1648,21 @@ export default function StudentSessionPage() {
                 playsInline
             />
 
+            {canStartLessonFromCenter && (
+                <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
+                    <Button
+                        type="button"
+                        size="lg"
+                        className="pointer-events-auto"
+                        aria-label="受講を開始"
+                        onClick={startPlayback}
+                    >
+                        <PlayIcon aria-hidden="true" />
+                        再生開始
+                    </Button>
+                </div>
+            )}
+
             <header
                 className={`absolute top-0 right-0 left-0 z-10 flex items-center justify-between gap-4 bg-black/60 px-6 py-3 text-white transition-opacity duration-150 ${controlsVisibilityClass}`}
             >
@@ -1144,7 +1670,7 @@ export default function StudentSessionPage() {
                     {lessonVideoFileName}
                 </span>
                 <div className="group/badges flex shrink-0 gap-2">
-                    {studentId && <Badge variant="secondary">{studentId}</Badge>}
+                    <Badge variant="secondary">受講者</Badge>
                     <Badge>{isCameraSending ? "カメラ送信中" : "カメラ待機中"}</Badge>
                     {latestScore && (
                         <Badge
@@ -1174,6 +1700,7 @@ export default function StudentSessionPage() {
                             isCalibrationOpen ||
                             !sessionId ||
                             isWebSocketConnecting ||
+                            resultStreamState !== "connected" ||
                             !isCalibrationDone ||
                             autoPauseState === "paused" ||
                             screenState === "ended" ||
@@ -1227,13 +1754,7 @@ export default function StudentSessionPage() {
                         </AlertTitle>
                         <AlertDescription className="flex flex-col gap-3">
                             <span>{message}</span>
-                            {autoPauseState === "paused" &&
-                                autoPauseReason === "drowsiness" &&
-                                latestScore && (
-                                    <span>
-                                        {latestScore.score.toFixed(2)} / 1.0
-                                    </span>
-                                )}
+
                             {autoPauseState === "paused" &&
                                 autoPauseReason === "face_not_detected" && (
                                     <video
@@ -1303,11 +1824,34 @@ export default function StudentSessionPage() {
                         <Button
                             onClick={() => {
                                 setIsWebSocketErrorOpen(false);
-                                startPlayback();
+                                retryFrameSocketConnection();
                             }}
                         >
                             再試行
                         </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog
+                open={isResultStreamErrorOpen}
+                onOpenChange={setIsResultStreamErrorOpen}
+            >
+                <DialogContent className="w-full max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>解析イベント接続エラー</DialogTitle>
+                        <DialogDescription>
+                            SignalRの接続またはセッション購読に失敗しました。動画と解析は停止しています。Backendの起動状態を確認して再接続してください。
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <Button
+                            variant="outline"
+                            onClick={() => setIsResultStreamErrorOpen(false)}
+                        >
+                            閉じる
+                        </Button>
+                        <Button onClick={retryResultStream}>再接続</Button>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
@@ -1385,23 +1929,10 @@ export default function StudentSessionPage() {
                             muted
                             playsInline
                         />
-                        <div className="grid gap-2 text-sm md:grid-cols-2">
-                            <span className="text-muted-foreground">
-                                WebSocket: {isWebSocketConnected ? "接続済み" : "接続中"}
-                            </span>
-                            <span className="text-muted-foreground">
-                                解析イベント: {resultStreamState}
-                            </span>
-                        </div>
                         {screenState === "calibrating" && (
                             <>
                                 <Progress value={calibrationProgress} />
-                                <div className="flex justify-between text-sm text-muted-foreground">
-                                    <span>
-                                        {calibrationStatus
-                                            ? `${calibrationStatus.validFrames}/${calibrationStatus.totalFrames} frames`
-                                            : "Worker 解析待ち"}
-                                    </span>
+                                <div className="flex justify-end text-sm text-muted-foreground">
                                     <span>{Math.round(calibrationProgress)}%</span>
                                 </div>
                             </>
@@ -1421,6 +1952,7 @@ export default function StudentSessionPage() {
                             onClick={startCalibration}
                             disabled={
                                 screenState === "calibrating" ||
+                                isWebSocketConnecting ||
                                 resultStreamState !== "connected"
                             }
                         >
@@ -1433,27 +1965,6 @@ export default function StudentSessionPage() {
             </Dialog>
         </main>
     );
-}
-
-function readStoredStudentSession() {
-    const storedSession = sessionStorage.getItem(studentSessionStorageKey);
-    if (!storedSession) {
-        return null;
-    }
-
-    try {
-        const parsed = JSON.parse(storedSession) as Partial<StoredStudentSession>;
-        if (typeof parsed.sessionId !== "string" || typeof parsed.studentId !== "string") {
-            return null;
-        }
-
-        return {
-            sessionId: parsed.sessionId,
-            studentId: parsed.studentId,
-        } satisfies StoredStudentSession;
-    } catch {
-        return null;
-    }
 }
 
 function attachStreamToVideo(video: HTMLVideoElement, stream: MediaStream) {
@@ -1511,7 +2022,7 @@ async function sendPlaybackEvent(
     );
 
     try {
-        const response = await fetch(buildPlaybackEventsUrl(sessionId), {
+        const response = await apiFetch(buildPlaybackEventsPath(sessionId), {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -1523,6 +2034,12 @@ async function sendPlaybackEvent(
             }),
             signal: abortController.signal,
         });
+
+        if (response.status === 401) {
+            sessionStorage.removeItem(studentSessionStorageKey);
+            window.location.assign("/student");
+            return;
+        }
 
         if (!response.ok) {
             console.warn("再生イベントの送信に失敗しました。", {
@@ -1605,7 +2122,7 @@ async function fetchWithTimeout(url: string, timeoutMs: number) {
 
 function buildBackendHealthUrl(baseUrl: string) {
     const url = new URL(baseUrl);
-    url.pathname = "/WeatherForecast";
+    url.pathname = "/health/ready";
     url.search = "";
     return url.toString();
 }
@@ -1617,11 +2134,71 @@ function buildAnalysisEventsHubUrl() {
     return url.toString();
 }
 
-function buildPlaybackEventsUrl(sessionId: string) {
+function buildPlaybackEventsPath(sessionId: string) {
     const url = new URL(apiBaseUrl);
     url.pathname = `/api/sessions/${sessionId}/playback-events`;
     url.search = "";
-    return url.toString();
+    return `${url.pathname}${url.search}`;
+}
+
+function buildCalibrationPath(sessionId: string) {
+    const url = new URL(apiBaseUrl);
+    url.pathname = `/api/sessions/${sessionId}/calibration`;
+    url.search = "";
+    return `${url.pathname}${url.search}`;
+}
+
+async function getPersistedCalibration(
+    sessionId: string,
+): Promise<PersistedCalibration | null> {
+    const response = await apiFetch(buildCalibrationPath(sessionId), {
+        cache: "no-store",
+    });
+
+    if (response.status === 204) {
+        return null;
+    }
+
+    if (response.status === 401) {
+        sessionStorage.removeItem(studentSessionStorageKey);
+        throw new Error("受講セッションの有効期限が切れました。ログインし直してください。");
+    }
+
+    if (response.status === 403) {
+        throw new Error("この受講セッションのキャリブレーション状態を確認する権限がありません。");
+    }
+
+    if (!response.ok) {
+        throw new Error(
+            `キャリブレーション状態の取得に失敗しました: ${response.status}`,
+        );
+    }
+
+    const calibration = (await response.json()) as Partial<PersistedCalibration>;
+    if (
+        calibration.sessionId !== sessionId ||
+        typeof calibration.earOpen !== "number" ||
+        typeof calibration.earThreshold !== "number" ||
+        typeof calibration.validFrames !== "number" ||
+        typeof calibration.totalFrames !== "number" ||
+        typeof calibration.sourceSequenceNo !== "number" ||
+        typeof calibration.calibratedAt !== "string"
+    ) {
+        throw new Error("キャリブレーション状態の応答が不正です。");
+    }
+
+    return {
+        type: "calibration_status",
+        sessionId,
+        status: "succeeded",
+        validFrames: calibration.validFrames,
+        totalFrames: calibration.totalFrames,
+        targetFrames: calibration.totalFrames,
+        sourceSequenceNo: calibration.sourceSequenceNo,
+        calibratedAt: calibration.calibratedAt,
+        earOpen: calibration.earOpen,
+        earThreshold: calibration.earThreshold,
+    };
 }
 
 function parseAnalysisEvent(value: unknown): AnalysisEvent | null {
@@ -1632,7 +2209,10 @@ function parseAnalysisEvent(value: unknown): AnalysisEvent | null {
     const parsed = value as Partial<AnalysisEvent>;
     if (
         parsed.type === "drowsiness_score" &&
-        typeof parsed.sessionId === "string"
+        typeof parsed.sessionId === "string" &&
+        typeof parsed.videoTimeSec === "number" &&
+        Number.isFinite(parsed.videoTimeSec) &&
+        parsed.videoTimeSec >= 0
     ) {
         return parsed as DrowsinessScoreEvent;
     }
@@ -1654,6 +2234,8 @@ function parseAnalysisEvent(value: unknown): AnalysisEvent | null {
 function shouldAutoPause(score: DrowsinessScoreEvent) {
     return score.shouldPause || score.level === "danger" || score.score >= 0.75;
 }
+
+
 
 function getLessonVideoFileName(videoUrl: string) {
     try {

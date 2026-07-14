@@ -44,6 +44,17 @@ class CalibrationTracker:
         self.result = None
         return self.progress
 
+    def restore(self, result: CalibrationResult) -> CalibrationProgress:
+        if result.valid_frames < self.min_valid_frames or result.total_frames != self.target_frames:
+            raise ValueError("restored calibration does not satisfy calibration requirements")
+        if result.ear_open <= 0 or result.ear_threshold <= 0:
+            raise ValueError("restored calibration thresholds must be positive")
+        self.status = "succeeded"
+        self._total_frames = result.total_frames
+        self._valid_ears = [result.ear_open] * result.valid_frames
+        self.result = result
+        return self.progress
+
     @property
     def progress(self) -> CalibrationProgress:
         return CalibrationProgress(

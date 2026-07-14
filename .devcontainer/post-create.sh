@@ -64,6 +64,11 @@ if [ -f "/workspace/src/frontend/package.json" ]; then
     cd /workspace/src/frontend
     pnpm install --silent
     ok "pnpm install 完了"
+    if pnpm exec playwright --version >/dev/null 2>&1; then
+        ok "Playwright Chromium をインストール中..."
+        pnpm exec playwright install chromium
+        ok "Playwright Chromium のインストール完了"
+    fi
     cd /workspace
 else
     warn "src/frontend/package.json が見つかりません（スキップ）"
@@ -119,8 +124,9 @@ cat << 'EOF'
   │   Host=postgres;Port=5432;Database=sd2;                            │
   │   Username=<POSTGRES_USER>;Password=<POSTGRES_PASSWORD>            │
   ├─────────────────────────────────────────────────────────────────────┤
-  │ Redis                                                               │
+  │ Redis (Backend shared connection string)                           │
   │   redis:6379,password=<REDIS_PASSWORD>                             │
+  │   Worker also accepts this format and normalizes it to redis-py URL.│
   ├─────────────────────────────────────────────────────────────────────┤
   │ Azurite – Blob                                                      │
   │   DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;      │

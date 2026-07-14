@@ -1,8 +1,10 @@
+using System.Security.Claims;
 using Awaver.Backend.Controllers;
 using Awaver.Backend.Data;
 using Awaver.Backend.Dto;
 using Awaver.Backend.Models;
 using Awaver.Backend.Services;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -11,177 +13,43 @@ namespace Awaver.Backend.Tests;
 public sealed class AdminTeachersControllerTests
 {
     [Fact]
-    public async Task Login_ReturnsSuccessForValidCredentials()
+    public async Task Login_CreatesOpaqueServerSessionAndHttpOnlyCookie()
     {
-        await using var dbContext = CreateDbContext();
-        await SeedAdminAsync(dbContext, "admin1", "correct-password");
-        var controller = CreateController(dbContext);
+        await using var db = CreateDb();
+        db.Admins.Add(new Admin { AdminId = "admin1", PasswordHash = PasswordHasher.Hash("correct-password"), CreatedAt = DateTimeOffset.UtcNow });
+        await db.SaveChangesAsync();
+        var controller = new AdminController(db, Auth(db));
+        controller.ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() };
 
-        var result = await controller.Login(
-            new AdminLoginRequest { AdminId = "admin1", Password = "correct-password" },
-            CancellationToken.None);
+        var result = await controller.Login(new AdminLoginRequest { AdminId = "admin1", Password = "correct-password" }, CancellationToken.None);
 
-        var okResult = Assert.IsType<OkObjectResult>(result.Result);
-        var response = Assert.IsType<AdminLoginResponse>(okResult.Value);
-        Assert.True(response.Success);
+        var response = Assert.IsType<AuthLoginResponse>(Assert.IsType<OkObjectResult>(result.Result).Value);
+        Assert.True(response.Authenticated);
+        var session = await db.AuthSessions.SingleAsync();
+        Assert.Equal(AuthSessionService.AdminRole, session.PrincipalType);
+        Assert.Contains("awaver-auth=", controller.Response.Headers.SetCookie.ToString());
+        Assert.Contains("httponly", controller.Response.Headers.SetCookie.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task Login_ReturnsFailureForInvalidPassword()
+    public async Task CreateTeacher_UsesAuthenticatedAdminInsteadOfRequestBody()
     {
-        await using var dbContext = CreateDbContext();
-        await SeedAdminAsync(dbContext, "admin1", "correct-password");
-        var controller = CreateController(dbContext);
+        await using var db = CreateDb();
+        var controller = new AdminController(db, Auth(db));
+        controller.ControllerContext = WithPrincipal(AuthSessionService.AdminRole, "admin-from-session");
 
-        var result = await controller.Login(
-            new AdminLoginRequest { AdminId = "admin1", Password = "wrong-password" },
-            CancellationToken.None);
-
-        var okResult = Assert.IsType<OkObjectResult>(result.Result);
-        var response = Assert.IsType<AdminLoginResponse>(okResult.Value);
-        Assert.False(response.Success);
-    }
-
-    [Fact]
-    public async Task Login_ReturnsFailureForUnknownAdminId()
-    {
-        await using var dbContext = CreateDbContext();
-        var controller = CreateController(dbContext);
-
-        var result = await controller.Login(
-            new AdminLoginRequest { AdminId = "unknown-admin", Password = "whatever" },
-            CancellationToken.None);
-
-        var okResult = Assert.IsType<OkObjectResult>(result.Result);
-        var response = Assert.IsType<AdminLoginResponse>(okResult.Value);
-        Assert.False(response.Success);
-    }
-
-    [Fact]
-    public async Task CreateTeacher_SavesValidTeacherAndHashesPassword()
-    {
-        await using var dbContext = CreateDbContext();
-        await SeedAdminAsync(dbContext, "admin1", "admin-password");
-        var controller = CreateController(dbContext);
-
-        var result = await controller.CreateTeacher(
-            new CreateTeacherRequest { AdminId = "admin1", TeacherId = "teacher1", Password = "teacher-password" },
-            CancellationToken.None);
+        var result = await controller.CreateTeacher(new CreateTeacherRequest { TeacherId = "teacher1", Password = "teacher-password" }, CancellationToken.None);
 
         Assert.IsType<CreatedAtActionResult>(result.Result);
-
-        var teacher = await dbContext.Teachers.SingleAsync();
-        Assert.Equal("teacher1", teacher.TeacherId);
-        Assert.Equal("admin1", teacher.CreatedByAdminId);
-        Assert.NotEqual("teacher-password", teacher.PasswordHash);
+        var teacher = await db.Teachers.SingleAsync();
+        Assert.Equal("admin-from-session", teacher.CreatedByAdminId);
         Assert.True(PasswordHasher.Verify("teacher-password", teacher.PasswordHash));
     }
 
-    [Fact]
-    public async Task CreateTeacher_ReturnsConflictForDuplicateTeacherId()
+    private static AwaverDbContext CreateDb() => new(new DbContextOptionsBuilder<AwaverDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
+    private static AuthSessionService Auth(AwaverDbContext db) => new(db, new AuthCookieOptions { IsDevelopment = true });
+    private static ControllerContext WithPrincipal(string role, string id) => new()
     {
-        await using var dbContext = CreateDbContext();
-        await SeedAdminAsync(dbContext, "admin1", "admin-password");
-        var controller = CreateController(dbContext);
-
-        await controller.CreateTeacher(
-            new CreateTeacherRequest { AdminId = "admin1", TeacherId = "teacher1", Password = "teacher-password" },
-            CancellationToken.None);
-
-        var result = await controller.CreateTeacher(
-            new CreateTeacherRequest { AdminId = "admin1", TeacherId = "teacher1", Password = "another-password" },
-            CancellationToken.None);
-
-        Assert.IsType<ConflictObjectResult>(result.Result);
-        Assert.Single(dbContext.Teachers);
-    }
-
-    [Fact]
-    public async Task CreateTeacher_ReturnsUnauthorizedForUnknownAdmin()
-    {
-        await using var dbContext = CreateDbContext();
-        var controller = CreateController(dbContext);
-
-        var result = await controller.CreateTeacher(
-            new CreateTeacherRequest { AdminId = "unknown-admin", TeacherId = "teacher1", Password = "teacher-password" },
-            CancellationToken.None);
-
-        Assert.IsType<UnauthorizedObjectResult>(result.Result);
-        Assert.Empty(dbContext.Teachers);
-    }
-
-    [Fact]
-    public async Task CreateTeacher_ReturnsBadRequestForBlankTeacherId()
-    {
-        await using var dbContext = CreateDbContext();
-        await SeedAdminAsync(dbContext, "admin1", "admin-password");
-        var controller = CreateController(dbContext);
-
-        var result = await controller.CreateTeacher(
-            new CreateTeacherRequest { AdminId = "admin1", TeacherId = "   ", Password = "teacher-password" },
-            CancellationToken.None);
-
-        Assert.IsType<BadRequestObjectResult>(result.Result);
-        Assert.Empty(dbContext.Teachers);
-    }
-
-    [Fact]
-    public async Task CreateTeacher_ReturnsBadRequestForEmptyPassword()
-    {
-        await using var dbContext = CreateDbContext();
-        await SeedAdminAsync(dbContext, "admin1", "admin-password");
-        var controller = CreateController(dbContext);
-
-        var result = await controller.CreateTeacher(
-            new CreateTeacherRequest { AdminId = "admin1", TeacherId = "teacher1", Password = "" },
-            CancellationToken.None);
-
-        Assert.IsType<BadRequestObjectResult>(result.Result);
-        Assert.Empty(dbContext.Teachers);
-    }
-
-    [Fact]
-    public async Task GetTeachers_ReturnsTeachersWithoutPasswordHash()
-    {
-        await using var dbContext = CreateDbContext();
-        await SeedAdminAsync(dbContext, "admin1", "admin-password");
-        var controller = CreateController(dbContext);
-        await controller.CreateTeacher(
-            new CreateTeacherRequest { AdminId = "admin1", TeacherId = "teacher1", Password = "teacher-password" },
-            CancellationToken.None);
-
-        var result = await controller.GetTeachers(CancellationToken.None);
-
-        var okResult = Assert.IsType<OkObjectResult>(result.Result);
-        var teachers = Assert.IsAssignableFrom<IEnumerable<TeacherSummaryResponse>>(okResult.Value);
-        var teacher = Assert.Single(teachers);
-        Assert.Equal("teacher1", teacher.TeacherId);
-        Assert.Equal("admin1", teacher.CreatedByAdminId);
-        Assert.DoesNotContain("passwordHash", teacher.ToString(), StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static AwaverDbContext CreateDbContext()
-    {
-        var options = new DbContextOptionsBuilder<AwaverDbContext>()
-            .UseInMemoryDatabase(Guid.NewGuid().ToString())
-            .Options;
-
-        return new AwaverDbContext(options);
-    }
-
-    private static AdminController CreateController(AwaverDbContext dbContext)
-    {
-        return new AdminController(dbContext);
-    }
-
-    private static async Task SeedAdminAsync(AwaverDbContext dbContext, string adminId, string password)
-    {
-        dbContext.Admins.Add(new Admin
-        {
-            AdminId = adminId,
-            PasswordHash = PasswordHasher.Hash(password),
-            CreatedAt = DateTimeOffset.UtcNow,
-        });
-        await dbContext.SaveChangesAsync();
-    }
+        HttpContext = new DefaultHttpContext { User = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.Role, role), new Claim(ClaimTypes.NameIdentifier, id)], "test")) }
+    };
 }

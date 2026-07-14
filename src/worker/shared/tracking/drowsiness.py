@@ -26,6 +26,26 @@ def should_pause(level: DrowsinessLevel, score: float) -> bool:
     return level == "danger" or score >= 0.75
 
 
+def result_for_perclos(
+    *,
+    perclos: float,
+    metrics: FaceMetrics,
+    is_closed: bool,
+    window_frames: int,
+) -> DrowsinessResult:
+    """Build a score from a PERCLOS window using the shared scoring formula."""
+    score = calculate_score(perclos, metrics.pitch_deg, metrics.yaw_deg)
+    level = classify_level(score)
+    return DrowsinessResult(
+        perclos=perclos,
+        score=score,
+        level=level,
+        should_pause=should_pause(level, score),
+        is_closed=is_closed,
+        window_frames=window_frames,
+    )
+
+
 class DrowsinessScorer:
     def __init__(self, *, window_size: int = 75) -> None:
         if window_size <= 0:
@@ -49,15 +69,9 @@ class DrowsinessScorer:
 
         is_closed = metrics.ear < ear_threshold
         self._closed_window.append(is_closed)
-        perclos = self.perclos
-        score = calculate_score(perclos, metrics.pitch_deg, metrics.yaw_deg)
-        level = classify_level(score)
-
-        return DrowsinessResult(
-            perclos=perclos,
-            score=score,
-            level=level,
-            should_pause=should_pause(level, score),
+        return result_for_perclos(
+            perclos=self.perclos,
+            metrics=metrics,
             is_closed=is_closed,
             window_frames=len(self._closed_window),
         )

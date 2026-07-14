@@ -8,10 +8,9 @@ public sealed class FramePipeline(IFrameStorage storage, IFrameQueue queue)
         var message = new FrameQueueMessage(
             frame.SessionId,
             frame.SequenceNo,
-            frame.FrameType.ToString(),
-            frame.BaseIFrameSequenceNo,
             blobPath,
             frame.CapturedAt,
+            frame.VideoTimeSec,
             frame.ReceivedAt,
             frame.Codec);
 

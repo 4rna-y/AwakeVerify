@@ -1,81 +1,50 @@
-# 管理者による教員追加から教員ログインまでのシナリオ
+# 管理者による教員アカウント管理API利用シナリオ
 
 ## 1. 目的
 
-管理者が教員アカウントを追加し、その教員がログインして教員ダッシュボードへアクセスできるようになるまでの流れを定義する。
+初期管理者が管理者ログインを完了し、認証済みAPIを通じて教員アカウントを追加・一覧確認できることを定義する。`/admin/teachers` のフロントエンド画面は提供しない。
 
 ## 2. アクター
 
 - 管理者
-- 教員
-- フロントエンド
+- APIクライアント
 - バックエンド
 - PostgreSQL
 
 ## 3. 前提条件
 
-- 管理者が管理者ページへアクセスできる。
-- 管理者自身はIDとパスワードで認証される前提である。
-- バックエンドとPostgreSQLが利用可能である。
+- BackendとPostgreSQLが利用可能である。
+- 初回起動前に `ADMIN_ID` と `ADMIN_PASSWORD` がBackendプロセスへ設定されている。
 
 ## 4. Feature path
 
-1. [`13-teacher-account-management.md`](../features/13-teacher-account-management.md)
-2. [`12-teacher-login.md`](../features/12-teacher-login.md)
-3. [`14-teacher-dashboard.md`](../features/14-teacher-dashboard.md)
+1. [`12-teacher-login.md`](../features/12-teacher-login.md)
+2. [`13-teacher-account-management.md`](../features/13-teacher-account-management.md)
 
-## 5. E2Eフロー
+## 5. フロー
 
-1. 管理者が `/admin/teachers` にアクセスする。
-2. フロントエンドが管理者認証状態を確認する。
-3. 管理者が教員IDとパスワードを入力する。
-4. フロントエンドが入力内容を検証する。
-   - 教員IDは空文字不可。
-   - 教員IDの前後空白は送信前に除去する。
-   - パスワードは空文字不可。
-   - パスワードは画面上でマスクする。
-5. フロントエンドが `POST /api/admin/teachers` を呼び出す。
-6. バックエンドが管理者認証を確認する。
-7. バックエンドが `teacherId` の重複を確認する。
-8. バックエンドがパスワードをハッシュ化する。
-9. バックエンドが `teachers` に教員アカウントを保存する。
-10. フロントエンドが教員一覧を更新する。
-11. 教員が `/teacher/login` にアクセスする。
-12. 教員が追加された教員IDとパスワードを入力する。
-13. フロントエンドが `POST /api/teacher/login` を呼び出す。
-14. バックエンドが `teachers.password_hash` と照合する。
-15. 認証成功後、教員は `/teacher/dashboard` へ遷移する。
+1. 管理者が生徒ログイン画面の「管理者ログインはこちら」を選択する。または旧 `/teacher/login` にアクセスする。
+2. フロントエンドが `/admin/login` の管理者ログイン画面を表示する。
+3. 管理者が `ADMIN_ID` と `ADMIN_PASSWORD` を入力する。
+4. フロントエンドが `POST /api/admin/login` を呼び出す。
+5. Backendが `admins.password_hash` と照合し、`admin` HttpOnly認証Cookieを設定する。
+6. フロントエンドが `/admin/dashboard` を表示する。
+7. 認証済み管理者のAPIクライアントが資格情報付きで `POST /api/admin/teachers` を呼び出す。request bodyに `adminId` は含めない。
+8. Backendが `admin` sessionを確認し、教員IDの重複を確認する。
+9. Backendがパスワードをハッシュ化して `teachers` に保存し、認証済み管理者IDを `created_by_admin_id` に記録する。
+10. APIクライアントが `GET /api/admin/teachers` で登録結果を確認する。
 
 ## 6. 期待結果
 
-- 管理者は教員アカウントを追加できる。
-- 教員パスワードは平文保存されない。
-- 追加された教員は教員ログイン画面からログインできる。
-- ログイン成功後、教員ダッシュボードへアクセスできる。
+- 初期管理者は `/admin/login` でログインでき、認証成功後は `/admin/dashboard` が表示される。
+- `/admin/teachers` のフロントエンド画面は存在しない。
+- 管理者は認証済みAPIを通じて教員アカウントを追加・一覧確認できる。
+- 教員パスワードは平文保存・ブラウザ永続領域への保存をされない。
+- `adminId` を偽装したrequest bodyだけでは教員を追加できない。
 
 ## 7. 例外・分岐
 
-- 管理者認証が失敗した場合、教員アカウントは追加されない。
+- 管理者資格情報が誤っている場合、ダッシュボードを表示しない。
+- 管理者認証が失敗・期限切れ・失効している場合、教員アカウントは追加されない（`401`）。
 - `teacherId` が重複している場合、教員アカウントは追加されない。
-- 教員ログイン時にIDまたはパスワードが誤っている場合、ダッシュボードへ遷移しない。
-- 入力内容はフロントエンド永続領域へ保存しない。
-
-## 8. 関連データ
-
-```text
-teachers
-- teacher_id
-- password_hash
-- created_at
-- created_by_admin_id nullable
-
-admins
-- admin_id
-- password_hash
-- created_at
-```
-
-## 9. 未決定事項
-
-- 管理者ログイン後の具体的なセッション管理方式またはトークン方式
-- 教員ログイン後の具体的なセッション管理方式またはトークン方式
+- `.env` の資格情報を変更しても、すでに作成済みの同一管理者IDのパスワードは更新されない。

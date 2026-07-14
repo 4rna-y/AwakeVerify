@@ -10,14 +10,12 @@ public sealed class FrameWebSocketMessage
     [Range(1, int.MaxValue)]
     public int SequenceNo { get; init; }
 
-    [Required]
-    public required string FrameType { get; init; }
-
-    [Range(1, int.MaxValue)]
-    public int BaseIFrameSequenceNo { get; init; }
 
     [Required]
     public DateTimeOffset CapturedAt { get; init; }
+
+    [Required]
+    public double? VideoTimeSec { get; init; }
 
     [Required]
     public required string Codec { get; init; }
