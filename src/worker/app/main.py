@@ -1165,14 +1165,24 @@ def is_azure_frame_source_enabled(config: WorkerConfig) -> bool:
 
 def check_service_bus_dependency(*, service_bus_connection_string: str, queue_name: str, timeout_seconds: float) -> DependencyCheckResult:
     try:
-        azure_servicebus = cast(Any, __import__("azure.servicebus", fromlist=["ServiceBusClient"]))
+        azure_servicebus = cast(Any, __import__("azure.servicebus", fromlist=["ServiceBusClient", "NEXT_AVAILABLE_SESSION"]))
         with azure_servicebus.ServiceBusClient.from_connection_string(service_bus_connection_string, socket_timeout=int(max(1.0, timeout_seconds)), retry_total=0) as service_bus_client:
-            # An empty session queue has no NEXT_AVAILABLE_SESSION to accept. Opening a sender
-            # link confirms that the configured queue and AMQP broker are available without
-            # waiting for a frame message or holding an idle session link.
-            with service_bus_client.get_queue_sender(queue_name=queue_name):
-                pass
-        return DependencyCheckResult("Service Bus", True, f"queue sender link={queue_name}")
+            # The Worker is intentionally granted Listen only. Opening a receiver verifies
+            # the same permission and AMQP path used for frame processing. An empty session
+            # queue may time out while acquiring NEXT_AVAILABLE_SESSION; that is healthy.
+            next_session = getattr(azure_servicebus, "NEXT_AVAILABLE_SESSION", "$all")
+            try:
+                with service_bus_client.get_queue_receiver(
+                    queue_name=queue_name,
+                    session_id=next_session,
+                    max_wait_time=timeout_seconds,
+                ):
+                    pass
+            except Exception as error:
+                if _is_no_available_session_timeout(error):
+                    return DependencyCheckResult("Service Bus", True, f"queue receiver idle={queue_name}")
+                raise
+        return DependencyCheckResult("Service Bus", True, f"queue receiver link={queue_name}")
     except Exception as error:
         return DependencyCheckResult("Service Bus", False, f"cannot reach queue {queue_name}: {short_error_message(error)}")
 

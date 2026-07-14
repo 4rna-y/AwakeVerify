@@ -115,14 +115,14 @@ class StartupChecksTests(TestCase):
             self.assertIn("SERVICEBUS_CONNECTION_STRING", str(context.exception))
             self.assertIn("BLOB_CONNECTION_STRING", str(context.exception))
 
-    def test_service_bus_probe_opens_a_sender_link_without_waiting_for_an_active_session(self) -> None:
-        sender = MagicMock()
-        sender.__enter__.return_value = sender
+    def test_service_bus_probe_opens_a_listen_receiver_link(self) -> None:
+        receiver = MagicMock()
+        receiver.__enter__.return_value = receiver
         client = MagicMock()
         client.__enter__.return_value = client
-        client.get_queue_sender.return_value = sender
+        client.get_queue_receiver.return_value = receiver
         service_bus_client = SimpleNamespace(from_connection_string=MagicMock(return_value=client))
-        azure_servicebus = SimpleNamespace(ServiceBusClient=service_bus_client)
+        azure_servicebus = SimpleNamespace(ServiceBusClient=service_bus_client, NEXT_AVAILABLE_SESSION="next-available-session")
 
         with patch("builtins.__import__", return_value=azure_servicebus):
             result = check_service_bus_dependency(
@@ -132,9 +132,34 @@ class StartupChecksTests(TestCase):
             )
 
         self.assertTrue(result.reachable)
-        self.assertEqual(result.detail, "queue sender link=frame-processing-queue")
-        client.get_queue_sender.assert_called_once_with(queue_name="frame-processing-queue")
-        client.get_queue_receiver.assert_not_called()
+        self.assertEqual(result.detail, "queue receiver link=frame-processing-queue")
+        client.get_queue_receiver.assert_called_once_with(
+            queue_name="frame-processing-queue",
+            session_id="next-available-session",
+            max_wait_time=3,
+        )
+        client.get_queue_sender.assert_not_called()
+
+    def test_service_bus_probe_accepts_empty_session_queue_timeout(self) -> None:
+        operation_timeout_error = type("OperationTimeoutError", (Exception,), {})
+        receiver = MagicMock()
+        receiver.__enter__.side_effect = operation_timeout_error("NEXT_AVAILABLE_SESSION acquisition timed out")
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.get_queue_receiver.return_value = receiver
+        service_bus_client = SimpleNamespace(from_connection_string=MagicMock(return_value=client))
+        azure_servicebus = SimpleNamespace(ServiceBusClient=service_bus_client, NEXT_AVAILABLE_SESSION="next-available-session")
+
+        with patch("builtins.__import__", return_value=azure_servicebus):
+            result = check_service_bus_dependency(
+                service_bus_connection_string="Endpoint=sb://example/;SharedAccessKeyName=name;SharedAccessKey=key",
+                queue_name="frame-processing-queue",
+                timeout_seconds=3,
+            )
+
+        self.assertTrue(result.reachable)
+        self.assertEqual(result.detail, "queue receiver idle=frame-processing-queue")
+        client.get_queue_sender.assert_not_called()
 
     def test_legacy_devcontainer_redis_connection_string_is_normalized_to_a_url(self) -> None:
         result = normalize_redis_connection_string("redis:6379,password=R8spudTivuoA5XUSqBDxvA==")
