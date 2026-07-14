@@ -73,6 +73,8 @@ class VirtualSession {
     private nextSequenceNo = 1;
     private highestAcknowledgedSequence = 0;
     private acknowledgementOrderValid = true;
+    private maintainFrameSocket = true;
+    private reconnectPromise: Promise<void> | undefined;
 
     public constructor(
         private readonly config: LoadTestConfig,
@@ -159,6 +161,7 @@ class VirtualSession {
         socket.on("error", () => undefined);
         try {
             await onceOpen(socket);
+            socket.on("close", () => this.handleUnexpectedFrameSocketClose(socket));
             if (isReconnect) this.metrics.increment("webSocketReconnects");
         } catch {
             this.metrics.increment("webSocketConnectionFailures");
@@ -167,10 +170,7 @@ class VirtualSession {
     }
 
     private async sendNextFrame(): Promise<void> {
-        if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-            this.metrics.increment("webSocketConnectionFailures");
-            return;
-        }
+        if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
         if (this.pendingFrames.size >= this.config.maxInFlightFrames) return;
 
         let sequenceNo = this.nextSequenceNo;
@@ -238,9 +238,10 @@ class VirtualSession {
 
     private async injectConfiguredFaults(): Promise<void> {
         if (this.config.faultInjection.has("ws-reconnect")) {
-            this.socket?.close(1000, "load-test reconnect");
-            await onceClose(this.socket);
-            await this.connectFrameSocket(true);
+            const socket = this.socket;
+            socket?.close(1000, "load-test reconnect");
+            await onceClose(socket);
+            await this.reconnectPromise;
         }
         if (this.config.faultInjection.has("signalr-reconnect") && this.connection) {
             await this.connection.stop();
@@ -250,10 +251,34 @@ class VirtualSession {
         }
     }
 
+    private handleUnexpectedFrameSocketClose(socket: WebSocket): void {
+        if (!this.maintainFrameSocket || this.socket !== socket) return;
+        this.metrics.increment("webSocketConnectionFailures");
+        this.reconnectPromise ??= this.reconnectFrameSocket();
+    }
+
+    private async reconnectFrameSocket(): Promise<void> {
+        try {
+            for (let attempt = 1; attempt <= 5 && this.maintainFrameSocket; attempt += 1) {
+                await delay(500 * 2 ** (attempt - 1));
+                try {
+                    await this.connectFrameSocket(true);
+                    return;
+                } catch {
+                    // The connection failure counter is updated by connectFrameSocket.
+                }
+            }
+        } finally {
+            this.reconnectPromise = undefined;
+        }
+    }
+
     private async close(): Promise<void> {
+        this.maintainFrameSocket = false;
         if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.close(1000, "load-test complete");
-            await onceClose(this.socket);
+            const socket = this.socket;
+            socket.close(1000, "load-test complete");
+            await onceClose(socket);
         }
         if (this.connection) await this.connection.stop();
     }

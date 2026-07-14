@@ -37,7 +37,10 @@ const defaults = {
     outputPath: "load-test-results/report.json",
 } as const;
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): LoadTestConfig {
+export function loadConfig(
+    env: Readonly<Record<string, string | undefined>> = process.env,
+    cwd = process.cwd(),
+): LoadTestConfig {
     const apiBaseUrl = parseApiBaseUrl(env.API_BASE_URL ?? defaults.apiBaseUrl);
     const config: LoadTestConfig = {
         concurrentSessions: positiveInteger(env.CONCURRENT_SESSIONS, "CONCURRENT_SESSIONS", defaults.concurrentSessions),

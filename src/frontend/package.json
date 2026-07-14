@@ -7,7 +7,9 @@
         "build": "next build",
         "start": "next start",
         "lint": "eslint",
-        "test:e2e": "playwright test"
+        "test:e2e": "playwright test",
+        "load-test": "tsx load-test/index.ts",
+        "test:load-test": "tsx --test load-test/*.test.ts"
     },
     "dependencies": {
         "@base-ui/react": "^1.5.0",
