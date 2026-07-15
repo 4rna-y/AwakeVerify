@@ -54,6 +54,29 @@ if [[ -n "$frontend_app" ]] && resource_exists "$frontend_app" "Microsoft.App/co
         printf 'FAIL image: Frontend image is absent or mutable/ambiguous: %s\n' "${frontend_image:-[absent]}" >&2
         status=1
     fi
+
+    lesson_video_id="$(az containerapp show \
+        --name "$frontend_app" \
+        --resource-group "$DEMO_RESOURCE_GROUP" \
+        --query "properties.template.containers[0].env[?name=='LESSON_VIDEO_ID'].value | [0]" \
+        --output tsv 2>/dev/null || true)"
+    lesson_video_secret_ref="$(az containerapp show \
+        --name "$frontend_app" \
+        --resource-group "$DEMO_RESOURCE_GROUP" \
+        --query "properties.template.containers[0].env[?name=='LESSON_VIDEO_URL'].secretRef | [0]" \
+        --output tsv 2>/dev/null || true)"
+    if [[ "$lesson_video_id" != "60s" ]]; then
+        printf 'FAIL env: Frontend LESSON_VIDEO_ID must be 60s.\n' >&2
+        status=1
+    else
+        printf 'Frontend LESSON_VIDEO_ID: 60s\n'
+    fi
+    if [[ -z "$lesson_video_secret_ref" ]]; then
+        printf 'FAIL env: Frontend LESSON_VIDEO_URL must use a secretRef.\n' >&2
+        status=1
+    else
+        printf 'Frontend LESSON_VIDEO_URL secretRef: present (secret value not read)\n'
+    fi
 fi
 if resource_exists "$DEMO_BACKEND_APP" "Microsoft.App/containerApps"; then
     print_containerapp_scale "$DEMO_BACKEND_APP"

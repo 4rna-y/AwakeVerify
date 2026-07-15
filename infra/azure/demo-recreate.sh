@@ -9,12 +9,20 @@ source "$script_dir/demo-common.sh"
 
 parameters_file="${AZURE_PARAMETERS_FILE:?Set AZURE_PARAMETERS_FILE to the ignored secure parameters file}"
 runtime_parameters_file=""
-cleanup_runtime_parameters() {
+runtime_parameters_update_file=""
+video_url_file=""
+cleanup_runtime_files() {
+    if [[ -n "$runtime_parameters_update_file" && -f "$runtime_parameters_update_file" ]]; then
+        rm -f -- "$runtime_parameters_update_file"
+    fi
+    if [[ -n "$video_url_file" && -f "$video_url_file" ]]; then
+        rm -f -- "$video_url_file"
+    fi
     if [[ -n "$runtime_parameters_file" && -f "$runtime_parameters_file" ]]; then
         rm -f -- "$runtime_parameters_file"
     fi
 }
-trap cleanup_runtime_parameters EXIT
+trap cleanup_runtime_files EXIT
 
 image_tag="${AZURE_IMAGE_TAG:?Set AZURE_IMAGE_TAG to an immutable published GHCR tag}"
 backend_api_app_id="${AZURE_BACKEND_API_APP_ID:?Set AZURE_BACKEND_API_APP_ID to the Backend API App Registration client ID}"
@@ -30,12 +38,14 @@ assert_immutable_image_tag "$image_tag"
 assert_parameter_file_image_contract "$DEMO_WORKSPACE_ROOT/infra/azure/nonprod.parameters.json" "$image_tag"
 assert_parameter_file_image_contract "$parameters_file" "$image_tag"
 
-printf '\nRecreate plan (existing deployment scripts are reused):\n'
-printf '1. Bicep build, foundation validation, and Frontend-enabled workload validation\n'
+printf '\nRecreate plan (existing deployment scripts and their TTY prompts are preserved):\n'
+printf '1. Bicep build and foundation validation\n'
 printf '2. Foundation deployment via deploy.sh\n'
-printf '3. Frontend/Backend/Worker deployment with the same immutable tag via deploy-workloads.sh\n'
-printf '4. analysis_worker app-role assignment to the new Worker managed identity\n'
-printf '5. Replica, health, queue, Outbox, immutable-image, and quota checks via demo-check.sh\n'
+printf '3. resrc/60s.mp4 upload and read-only SAS creation via demo-video-upload.sh\n'
+printf '4. Secret lessonVideoUrl and lessonVideoId=60s injection into a mode-0600 runtime parameter file\n'
+printf '5. Frontend-enabled workload validation and deployment via deploy-workloads.sh\n'
+printf '6. analysis_worker app-role assignment to the new Worker managed identity\n'
+printf '7. Replica, health, lesson env contract, queue, Outbox, image, and quota checks via demo-check.sh\n'
 printf 'Target: %s / prefix %s / image tag %s\n' "$DEMO_RESOURCE_GROUP" "$DEMO_NAME_PREFIX" "$image_tag"
 printf 'Secure parameter values are intentionally not displayed.\n'
 
@@ -47,9 +57,12 @@ fi
 confirm_fixed_phrase "RECREATE AWAVERTEST RESOURCES"
 
 require_command mktemp
+require_command stat
 runtime_parameters_file="$(mktemp "${TMPDIR:-/tmp}/awaver-demo-parameters.XXXXXX.json")"
 jq '
-    .parameters.deployFrontend = {"value": true}
+    del(.parameters.lessonVideoUrl, .parameters.lessonVideoId)
+    | .parameters.deployWorkloads = {"value": false}
+    | .parameters.deployFrontend = {"value": true}
     | .parameters.frontendMinReplicas = {"value": 1}
     | .parameters.frontendMaxReplicas = {"value": 1}
     | .parameters.backendMinInstances = {"value": 2}
@@ -64,6 +77,34 @@ export AZURE_PARAMETERS_FILE="$runtime_parameters_file"
 export AZURE_IMAGE_TAG="$image_tag"
 
 bash "$script_dir/validate.sh"
+bash "$script_dir/deploy.sh"
+assert_shared_resources_preserved
+
+video_url_file="$(mktemp "${TMPDIR:-/tmp}/awaver-demo-video-url.XXXXXX")"
+chmod 600 "$video_url_file"
+DEMO_VIDEO_URL_OUTPUT_FILE="$video_url_file" \
+ALLOW_AZURE_DEMO_VIDEO_UPLOAD=true \
+DEMO_VIDEO_OVERWRITE="${DEMO_VIDEO_OVERWRITE:-true}" \
+bash "$script_dir/demo-video-upload.sh"
+[[ -s "$video_url_file" ]] || fail "Video upload did not produce a SAS URL file."
+[[ "$(stat -c '%a' "$video_url_file")" == "600" ]] || fail "Video SAS URL file must have mode 0600."
+
+runtime_parameters_update_file="$(mktemp "${TMPDIR:-/tmp}/awaver-demo-parameters-update.XXXXXX.json")"
+jq --rawfile lesson_video_url "$video_url_file" '
+    ($lesson_video_url | gsub("[\\r\\n]+$"; "")) as $url
+    | if (($url | startswith("https://")) and (($url | length) > 8)) then
+        .parameters.lessonVideoUrl = {"value": $url}
+        | .parameters.lessonVideoId = {"value": "60s"}
+      else
+        error("Video SAS URL file is empty or invalid")
+      end
+' "$runtime_parameters_file" > "$runtime_parameters_update_file"
+chmod 600 "$runtime_parameters_update_file"
+mv -f -- "$runtime_parameters_update_file" "$runtime_parameters_file"
+runtime_parameters_update_file=""
+chmod 600 "$runtime_parameters_file"
+printf 'Injected lessonVideoUrl and lessonVideoId=60s into the protected runtime parameter file without displaying the URL.\n'
+
 az deployment group validate \
     --resource-group "$DEMO_RESOURCE_GROUP" \
     --template-file "$DEMO_WORKSPACE_ROOT/infra/azure/main.bicep" \
@@ -71,8 +112,6 @@ az deployment group validate \
     --parameters "@$runtime_parameters_file" \
     --parameters deployWorkloads=true deployFrontend=true imageTag="$image_tag" \
     --output none
-bash "$script_dir/deploy.sh"
-assert_shared_resources_preserved
 bash "$script_dir/deploy-workloads.sh"
 assert_shared_resources_preserved
 frontend_app="${DEMO_FRONTEND_APP_NAME:-$DEMO_FRONTEND_APP_DEFAULT}"
@@ -150,4 +189,4 @@ DEMO_EXPECTED_WORKER_READY=12 \
 DEMO_EXPECTED_WORKER_MAX=15 \
 bash "$script_dir/demo-check.sh"
 
-printf '\nRecreate completed. Next run demo-video-upload.sh and demo-domain-handoff.sh; do not start the demo until DNS, managed certificates, and custom-domain checks pass.\n'
+printf '\nRecreate completed. The temporary SAS URL and runtime parameter files were scheduled for cleanup. Next run demo-domain-handoff.sh; do not start the demo until DNS, managed certificates, and custom-domain checks pass.\n'

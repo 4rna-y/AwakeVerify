@@ -118,9 +118,6 @@ const frameIntervalMs = 200;
 const calibrationDurationMs = 5_000;
 const calibrationProgressIntervalMs = 100;
 const fallbackLessonDurationSec = 300;
-const lessonVideoUrl =
-    process.env.NEXT_PUBLIC_LESSON_VIDEO_URL ??
-    "http://127.0.0.1:10000/devstoreaccount1/lesson-videos/sample.mp4";
 const backendHealthUrl =
     process.env.NEXT_PUBLIC_BACKEND_HEALTH_URL ??
     buildBackendHealthUrl(apiBaseUrl);
@@ -133,7 +130,7 @@ const frameUploadBackoffBaseMs = 500;
 const autoPauseRewindSec = 5;
 const controlsInactivityTimeoutMs = 3000;
 
-export default function StudentSessionPage() {
+export default function StudentSessionPage({ lessonVideoUrl }: { lessonVideoUrl: string }) {
     const router = useRouter();
 
     const [sessionId, setSessionId] = useState<string | null>(null);

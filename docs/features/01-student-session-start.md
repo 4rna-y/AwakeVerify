@@ -64,7 +64,7 @@ response:
 1. `/` または `/student` で、画面中央にLoginモーダルを表示する。
 2. 初期状態は生徒ログインを主表示とし、学籍番号入力、ログインボタン、教員ログインへ切り替えるLinkTextButtonを表示する。
 3. 受講者が学籍番号を入力する。
-4. `NEXT_PUBLIC_LESSON_VIDEO_ID` を `videoId` として `POST /api/sessions` へ送信する。未設定時は `default` を送信する。
+4. SSR Frontendの実行環境変数 `LESSON_VIDEO_ID` をServer Componentから受け取り、`videoId` として `POST /api/sessions` へ送信する。未設定時は `default` を送信する。
 5. レスポンスの `sessionId` を同一ブラウザタブ内の受講中状態として保持する。キャリブレーション成功を受信した場合と動画再生中の進捗も同じ状態へ記録するが、再開可否の確定には使用しない。
 6. `/student/session` へ遷移し、以後のキャリブレーションと動画再生を行う。リロード時は保持した `sessionId` とHttpOnly `student_session` Cookieを照合し、成功済みキャリブレーションをBackendから取得して復元する。
 7. `/student/session` の初期照合で未認証・権限なし・Cookieと保持した `sessionId` の不一致を検出した場合は、保持した受講中状態を削除して `/student` へ遷移する。一時的な認証確認失敗はエラーとして表示し、受講者が再試行できるようにする。

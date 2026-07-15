@@ -27,9 +27,7 @@ type StartSessionResponse = {
     sessionId: string;
 };
 
-const lessonVideoId = process.env.NEXT_PUBLIC_LESSON_VIDEO_ID ?? "default";
-
-export default function StudentPage() {
+export default function StudentPage({ lessonVideoId }: { lessonVideoId: string }) {
     const router = useRouter();
     const [loginState, setLoginState] = useState<LoginState>("idle");
     const [studentId, setStudentId] = useState("");

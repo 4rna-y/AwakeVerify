@@ -162,6 +162,25 @@ assert_bicep_parameter_declared() {
     bicep_parameter_declared "$1" || fail "main.bicep must declare the final parameter '$1' before this operation can run."
 }
 
+bicep_parameter_is_secure() {
+    local parameter_name="$1"
+    local secure_decorator
+    secure_decorator="$(awk -v target="$parameter_name" '
+        /^[[:space:]]*@secure\(\)/ { secure = $0 }
+        /^[[:space:]]*param[[:space:]]+/ {
+            if ($2 == target) { print secure; exit }
+            secure = ""
+        }
+    ' "$DEMO_WORKSPACE_ROOT/infra/azure/main.bicep")"
+    [[ "$secure_decorator" =~ @secure\(\) ]]
+}
+
+assert_bicep_secure_parameter() {
+    local parameter_name="$1"
+    assert_bicep_parameter_declared "$parameter_name"
+    bicep_parameter_is_secure "$parameter_name" || fail "main.bicep parameter '$parameter_name' must be declared with @secure()."
+}
+
 bicep_parameter_allows_zero() {
     local parameter_name="$1"
     local minimum_decorator
@@ -187,9 +206,11 @@ assert_workload_bicep_contract() {
         deployFrontend imageTag frontendImage backendImage workerImage \
         frontendMinReplicas frontendMaxReplicas \
         backendMinInstances backendMaxInstances \
-        workerMinReplicas workerMaxReplicas; do
+        workerMinReplicas workerMaxReplicas \
+        lessonVideoUrl lessonVideoId; do
         assert_bicep_parameter_declared "$parameter_name"
     done
+    assert_bicep_secure_parameter lessonVideoUrl
 }
 
 assert_bicep_images_use_shared_tag() {

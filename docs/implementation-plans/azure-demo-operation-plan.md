@@ -225,9 +225,9 @@ Agentは次の場合、推測で進めずユーザーへ確認する。
 1. Phase 1〜4が完了し、デモ日が決まってから開始する。
 2. 最新のexampleから新しいsecure parameter fileを作り、新しい一時PostgreSQL password、初期管理者credential、一意なresource名を設定する。
 3. `deploy.sh`でfoundationを作成し、provider、quota、credit、各resource状態を確認する。
-4. `resrc/60s.mp4`を`videos` containerへuploadし、デモ終了後まで有効なBlob単体read-only URLを生成する。
-5. 指定domain、動画URL、video IDをFrontend buildへ設定し、clean commitからimmutable Frontend/Backend/Worker imageをbuild・publishする。
-6. immutable imageを指定して`deploy-workloads.sh`を実行する。
+4. clean commitから、指定domainをbuild設定に持つimmutable Frontend/Backend/Worker imageをbuild・publishする。動画URLとvideo IDはimageへ固定しない。
+5. `resrc/60s.mp4`を`videos` containerへuploadし、デモ終了後まで有効なBlob単体read-only URLを生成する。
+6. 動画URLをsecure `lessonVideoUrl`、video ID `60s`を`lessonVideoId`としてruntime parameterへ注入し、immutable imageを指定して`deploy-workloads.sh`を実行する。
 7. 新Worker identityへEntra ID `analysis_worker` app roleを割り当てる。
 8. 新しいデモ用ACA Environmentのstatic IPとverification IDを取得し、ユーザーへCloudflare A/TXT設定表を提示する。
 9. ユーザーのDNS設定完了後、外部resolverで反映を確認する。

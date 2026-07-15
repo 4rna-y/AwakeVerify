@@ -53,6 +53,13 @@ param frontendCpu int = 1
 @description('Container Apps memory allocated to each Frontend replica.')
 param frontendMemory string = '2Gi'
 
+@secure()
+@description('Read-only lesson video URL supplied to the Frontend at runtime. It is required only when the Frontend workload is deployed and is stored as an ACA secret.')
+param lessonVideoUrl string = ''
+
+@description('Lesson video identifier supplied to the Frontend at runtime.')
+param lessonVideoId string = '60s'
+
 @minValue(0)
 @description('Minimum Backend ACA replicas. Use zero between demos; restore the validated warm profile before a scheduled demo or load test.')
 param backendMinInstances int = 1
@@ -614,6 +621,12 @@ resource frontendContainerApp 'Microsoft.App/containerApps@2025-01-01' = if (dep
         ]
         customDomains: frontendCustomDomains
       }
+      secrets: [
+        {
+          name: 'lesson-video-url'
+          value: lessonVideoUrl
+        }
+      ]
     }
     template: {
       containers: [
@@ -632,6 +645,14 @@ resource frontendContainerApp 'Microsoft.App/containerApps@2025-01-01' = if (dep
             {
               name: 'PORT'
               value: '3000'
+            }
+            {
+              name: 'LESSON_VIDEO_URL'
+              secretRef: 'lesson-video-url'
+            }
+            {
+              name: 'LESSON_VIDEO_ID'
+              value: lessonVideoId
             }
           ]
           probes: [
