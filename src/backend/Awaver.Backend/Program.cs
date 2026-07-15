@@ -2,7 +2,6 @@ using Awaver.Backend.Data;
 using Awaver.Backend.Hubs;
 using Awaver.Backend.Models;
 using Awaver.Backend.Services;
-using Awaver.Backend.WebSockets;
 using Azure.Messaging.ServiceBus;
 using Azure.Monitor.OpenTelemetry.Exporter;
 using Azure.Storage.Blobs;
@@ -10,9 +9,12 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using OpenTelemetry.Metrics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.AspNetCore.HttpOverrides;
+using System.Net;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = FrameIngressRequest.MaxJpegBytes);
 var workerAuthMode = FirstNonWhiteSpace(builder.Configuration["Worker:AuthMode"], Environment.GetEnvironmentVariable("WORKER_AUTH_MODE"), builder.Environment.IsProduction() ? "entra_id" : "api_key");
 if (IsEntraWorkerAuthMode(workerAuthMode) || builder.Environment.IsProduction())
 {
@@ -148,12 +150,13 @@ if (!app.Environment.IsEnvironment("Testing"))
 }
 
 if (app.Environment.IsDevelopment()) app.MapOpenApi();
+var forwardedHeaders = BuildForwardedHeadersOptions(builder.Configuration, app.Environment);
+app.UseForwardedHeaders(forwardedHeaders);
 app.UseHttpsRedirection();
 app.UseCors("Frontend");
 app.UseAuthentication();
 app.UseMiddleware<CsrfProtectionMiddleware>();
 app.UseAuthorization();
-app.UseWebSockets();
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
 app.MapGet("/health/ready", async (BackendReadinessProbe readiness, CancellationToken cancellationToken) =>
 {
@@ -164,7 +167,6 @@ app.MapGet("/health/ready", async (BackendReadinessProbe readiness, Cancellation
 });
 app.MapControllers();
 app.MapHub<AnalysisEventsHub>("/hubs/analysis-events").RequireAuthorization();
-app.Map("/ws/sessions/{sessionId:guid}/frames", FrameWebSocketEndpoint.HandleAsync);
 app.Run();
 
 static string? BuildDevcontainerPostgresConnectionString()
@@ -193,5 +195,27 @@ static async Task SeedAdminAsync(AwaverDbContext dbContext, string adminId, stri
     await dbContext.SaveChangesAsync();
 }
 static string RequireConfigurationValue(string? value, string settingName) => !string.IsNullOrWhiteSpace(value) ? value : throw new InvalidOperationException($"Required configuration is missing: {settingName}. Local execution must use the production-equivalent dependency services.");
+static ForwardedHeadersOptions BuildForwardedHeadersOptions(IConfiguration configuration, IHostEnvironment environment)
+{
+    var options = new ForwardedHeadersOptions { ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto, ForwardLimit = 1 };
+    var proxyAddresses = configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? [];
+    var networkRanges = configuration.GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>() ?? [];
+    foreach (var proxyAddress in proxyAddresses)
+    {
+        if (!IPAddress.TryParse(proxyAddress, out var address)) throw new InvalidOperationException("ForwardedHeaders:KnownProxies contains an invalid IP address.");
+        options.KnownProxies.Add(address);
+    }
+    foreach (var networkRange in networkRanges)
+    {
+        var parts = networkRange.Split('/', 2);
+        if (parts.Length != 2 || !IPAddress.TryParse(parts[0], out var prefix) || !int.TryParse(parts[1], out var prefixLength)) throw new InvalidOperationException("ForwardedHeaders:KnownNetworks contains an invalid CIDR range.");
+        options.KnownIPNetworks.Add(new System.Net.IPNetwork(prefix, prefixLength));
+    }
+    if (environment.IsProduction() && proxyAddresses.Length == 0 && networkRanges.Length == 0)
+    {
+        throw new InvalidOperationException("ForwardedHeaders:KnownProxies or ForwardedHeaders:KnownNetworks must be configured in production.");
+    }
+    return options;
+}
 
 public partial class Program;

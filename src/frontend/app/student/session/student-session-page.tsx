@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable react-hooks/immutability -- lifecycle callbacks intentionally reference local handlers declared below. */
 
 import {
     SyntheticEvent,
@@ -40,7 +41,6 @@ type StudentScreenState =
     | "calibration_ready"
     | "calibrating"
     | "ready"
-    | "ws_connecting"
     | "streaming"
     | "paused"
     | "ended"
@@ -126,8 +126,8 @@ const workerHealthUrl =
     process.env.NEXT_PUBLIC_WORKER_HEALTH_URL ?? "http://localhost:8000/health";
 const serviceHealthCheckTimeoutMs = 3000;
 const playbackEventRequestTimeoutMs = 3000;
-const maxWebSocketConnectAttempts = 5;
-const webSocketBackoffBaseMs = 500;
+const maxFrameUploadAttempts = 3;
+const frameUploadBackoffBaseMs = 500;
 const autoPauseRewindSec = 5;
 const controlsInactivityTimeoutMs = 3000;
 
@@ -146,9 +146,7 @@ export default function StudentSessionPage() {
     const [lessonDurationSec, setLessonDurationSec] = useState(
         fallbackLessonDurationSec,
     );
-    const [isWebSocketConnecting, setIsWebSocketConnecting] = useState(false);
-    const [webSocketConnectAttempt, setWebSocketConnectAttempt] = useState(0);
-    const [isWebSocketErrorOpen, setIsWebSocketErrorOpen] = useState(false);
+    const [isFrameUploadErrorOpen, setIsFrameUploadErrorOpen] = useState(false);
     const [isResultStreamErrorOpen, setIsResultStreamErrorOpen] =
         useState(false);
     const [serviceCheckState, setServiceCheckState] =
@@ -174,7 +172,6 @@ export default function StudentSessionPage() {
     const autoPausePreviewVideoRef = useRef<HTMLVideoElement | null>(null);
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const streamRef = useRef<MediaStream | null>(null);
-    const socketRef = useRef<WebSocket | null>(null);
     const resultConnectionRef = useRef<signalR.HubConnection | null>(null);
     const frameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
         null,
@@ -185,13 +182,9 @@ export default function StudentSessionPage() {
     const calibrationIntervalRef = useRef<ReturnType<
         typeof setInterval
     > | null>(null);
-    const webSocketRetryTimeoutRef = useRef<ReturnType<
-        typeof setTimeout
-    > | null>(null);
     const controlsInactivityTimeoutRef = useRef<ReturnType<
         typeof setTimeout
     > | null>(null);
-    const webSocketConnectionIdRef = useRef(0);
     const activeSessionIdRef = useRef<string | null>(null);
     const sequenceNoRef = useRef(1);
     const frameCaptureGenerationRef = useRef(0);
@@ -207,15 +200,11 @@ export default function StudentSessionPage() {
     const restoredPlaybackPositionRef = useRef<number | null>(null);
     const playbackPositionRef = useRef(0);
     const lessonCompletedRef = useRef(false);
-    const webSocketRecoveryPlaybackRef = useRef(false);
     const autoPauseStateRef = useRef<AutoPauseState>("idle");
     const autoPauseReasonRef = useRef<AutoPauseReason | null>(null);
     const autoPauseEventSentRef = useRef(false);
     const pendingResumePlaybackEventRef = useRef(false);
     const pendingManualResumePlaybackEventRef = useRef(false);
-    const pendingPlaybackAfterSocketOpenRef = useRef(false);
-    const pendingAnalysisAfterSocketOpenRef = useRef(false);
-    const pendingFrameMessagesRef = useRef(new Map<number, { payload: string; retries: number }>());
     const lessonVideoFileName = getLessonVideoFileName(lessonVideoUrl);
 
     useEffect(() => {
@@ -231,15 +220,10 @@ export default function StudentSessionPage() {
     }, [playbackPosition]);
 
     useEffect(() => {
-        const pendingFrameMessages = pendingFrameMessagesRef.current;
         return () => {
-            webSocketConnectionIdRef.current += 1;
             stopFrameSending();
             stopPlaybackTimer();
             stopCalibrationTimer();
-            clearWebSocketRetryTimer();
-            socketRef.current?.close();
-            pendingFrameMessages.clear();
             const resultConnection = resultConnectionRef.current;
             resultConnectionRef.current = null;
             void resultConnection?.stop();
@@ -432,19 +416,9 @@ export default function StudentSessionPage() {
                     setIsCalibrationOpen(false);
                     setScreenState("ready");
                     markStoredSessionCalibrated(storedSession.sessionId);
-                    connectFrameSocketWithRetry(
-                        storedSession.sessionId,
-                        stream,
-                        false,
-                    );
                 } else {
                     setIsCalibrationOpen(true);
                     setScreenState("calibration_ready");
-                    connectFrameSocketWithRetry(
-                        storedSession.sessionId,
-                        stream,
-                        false,
-                    );
                 }
                 connectResultStream(storedSession.sessionId);
             } catch (error) {
@@ -552,7 +526,6 @@ export default function StudentSessionPage() {
         connectResultStream(activeSessionId);
         setIsCalibrationOpen(true);
         setScreenState("calibration_ready");
-        connectFrameSocketWithRetry(activeSessionId, stream, false);
     }
 
     function connectResultStream(activeSessionId: string) {
@@ -608,12 +581,9 @@ export default function StudentSessionPage() {
 
                     resultStreamStateRef.current = "connected";
                     setResultStreamState("connected");
-                    if (pendingAnalysisAfterSocketOpenRef.current) {
-                        pendingAnalysisAfterSocketOpenRef.current = false;
-                        const stream = streamRef.current;
-                        if (stream && socketRef.current?.readyState === WebSocket.OPEN) {
-                            startFrameSending(activeSessionId, stream);
-                        }
+                    const stream = streamRef.current;
+                    if (stream && isAnalysisActiveRef.current) {
+                        startFrameSending(activeSessionId, stream);
                     }
                 })
                 .catch(() => {
@@ -667,9 +637,6 @@ export default function StudentSessionPage() {
 
         resultStreamStateRef.current = "error";
         setResultStreamState("error");
-        webSocketRecoveryPlaybackRef.current = false;
-        pendingPlaybackAfterSocketOpenRef.current = false;
-        pendingAnalysisAfterSocketOpenRef.current = false;
         stopFrameSending();
 
         if (wasPlaying) {
@@ -693,9 +660,6 @@ export default function StudentSessionPage() {
 
     function pauseForResultStreamReconnect() {
         const wasPlaying = isPlayingRef.current;
-        webSocketRecoveryPlaybackRef.current = false;
-        pendingPlaybackAfterSocketOpenRef.current = false;
-        pendingAnalysisAfterSocketOpenRef.current = isAnalysisActiveRef.current;
         stopFrameSending();
         if (wasPlaying) {
             isPlayingRef.current = false;
@@ -883,13 +847,7 @@ export default function StudentSessionPage() {
         calibrationActiveRef.current = true;
         startCalibrationTimer();
 
-        if (socketRef.current?.readyState === WebSocket.OPEN) {
-            startFrameSending(activeSessionId, stream);
-            return;
-        }
-
-        pendingAnalysisAfterSocketOpenRef.current = true;
-        connectFrameSocketWithRetry(activeSessionId, stream, false);
+        startFrameSending(activeSessionId, stream);
     }
 
     function completeCalibration() {
@@ -989,21 +947,14 @@ export default function StudentSessionPage() {
         pendingResumePlaybackEventRef.current =
             pendingResumePlaybackEventRef.current || shouldSendResumeEvent;
 
-        if (socketRef.current?.readyState === WebSocket.OPEN) {
-            beginPlaybackAfterSocketOpen(activeSessionId, stream);
-            return;
-        }
-
-        connectFrameSocketWithRetry(activeSessionId, stream, true);
+        beginPlayback(activeSessionId, stream);
     }
 
-    function beginPlaybackAfterSocketOpen(
+    function beginPlayback(
         activeSessionId: string,
         stream: MediaStream,
     ) {
         if (resultStreamStateRef.current !== "connected") {
-            pendingPlaybackAfterSocketOpenRef.current = false;
-            webSocketRecoveryPlaybackRef.current = true;
             isPlayingRef.current = false;
             setIsPlaying(false);
             lessonVideoRef.current?.pause();
@@ -1015,7 +966,6 @@ export default function StudentSessionPage() {
             return;
         }
 
-        webSocketRecoveryPlaybackRef.current = false;
         isPlayingRef.current = true;
         setIsPlaying(true);
         setScreenState("streaming");
@@ -1049,12 +999,6 @@ export default function StudentSessionPage() {
             ? getCurrentVideoTime(lessonVideoRef.current)
             : playbackPositionRef.current;
 
-        webSocketConnectionIdRef.current += 1;
-        webSocketRecoveryPlaybackRef.current = false;
-        pendingPlaybackAfterSocketOpenRef.current = false;
-        pendingAnalysisAfterSocketOpenRef.current = false;
-        clearWebSocketRetryTimer();
-        setIsWebSocketConnecting(false);
         isPlayingRef.current = false;
         setIsPlaying(false);
         setScreenState("paused");
@@ -1147,9 +1091,6 @@ export default function StudentSessionPage() {
         const completedPosition = Math.max(0, Math.floor(finalPosition));
         pendingResumePlaybackEventRef.current = false;
         pendingManualResumePlaybackEventRef.current = false;
-        webSocketRecoveryPlaybackRef.current = false;
-        pendingPlaybackAfterSocketOpenRef.current = false;
-        pendingAnalysisAfterSocketOpenRef.current = false;
         isPlayingRef.current = false;
         setIsPlaying(false);
         lessonVideoRef.current?.pause();
@@ -1199,226 +1140,7 @@ export default function StudentSessionPage() {
         }
     }
 
-    function connectFrameSocketWithRetry(
-        activeSessionId: string,
-        stream: MediaStream,
-        startPlaybackOnOpen: boolean,
-    ) {
-        pendingPlaybackAfterSocketOpenRef.current =
-            startPlaybackOnOpen || pendingPlaybackAfterSocketOpenRef.current;
-        if (startPlaybackOnOpen) {
-            webSocketRecoveryPlaybackRef.current = true;
-        }
-
-        if (socketRef.current?.readyState === WebSocket.OPEN) {
-            if (pendingAnalysisAfterSocketOpenRef.current) {
-                pendingAnalysisAfterSocketOpenRef.current = false;
-                startFrameSending(activeSessionId, stream);
-            }
-            if (startPlaybackOnOpen) {
-                beginPlaybackAfterSocketOpen(activeSessionId, stream);
-            }
-            return;
-        }
-
-        if (socketRef.current?.readyState === WebSocket.CONNECTING) {
-            if (startPlaybackOnOpen) {
-                setScreenState("ws_connecting");
-            }
-            return;
-        }
-
-        const connectionId = webSocketConnectionIdRef.current + 1;
-        webSocketConnectionIdRef.current = connectionId;
-        setIsWebSocketErrorOpen(false);
-        attemptFrameSocketConnection(
-            activeSessionId,
-            stream,
-            1,
-            connectionId,
-            startPlaybackOnOpen,
-        );
-    }
-
-    function attemptFrameSocketConnection(
-        activeSessionId: string,
-        stream: MediaStream,
-        attempt: number,
-        connectionId: number,
-        showConnectingState: boolean,
-    ) {
-        clearWebSocketRetryTimer();
-        socketRef.current?.close();
-        socketRef.current = null;
-        stopFrameSending();
-        setIsWebSocketConnecting(true);
-        setWebSocketConnectAttempt(attempt);
-        if (showConnectingState) {
-            setScreenState("ws_connecting");
-        }
-
-        const wsUrl = buildFrameWebSocketUrl(activeSessionId);
-        const socket = new WebSocket(wsUrl);
-        socketRef.current = socket;
-        let hasOpened = false;
-        let nextRetryAttempt = attempt;
-
-            socket.addEventListener("open", () => {
-            if (
-                connectionId !== webSocketConnectionIdRef.current ||
-                socketRef.current !== socket
-            ) {
-                socket.close();
-                return;
-            }
-
-            hasOpened = true;
-            nextRetryAttempt = 1;
-            setIsWebSocketConnecting(false);
-            setWebSocketConnectAttempt(0);
-            pendingFrameMessagesRef.current.clear();
-
-            if (pendingAnalysisAfterSocketOpenRef.current) {
-                pendingAnalysisAfterSocketOpenRef.current = false;
-                if (calibrationActiveRef.current) {
-                    setScreenState("calibrating");
-                }
-                startFrameSending(activeSessionId, stream);
-            }
-
-            if (pendingPlaybackAfterSocketOpenRef.current) {
-                pendingPlaybackAfterSocketOpenRef.current = false;
-                beginPlaybackAfterSocketOpen(activeSessionId, stream);
-            }
-        });
-
-        socket.addEventListener("close", () => {
-            if (
-                connectionId !== webSocketConnectionIdRef.current ||
-                socketRef.current !== socket
-            ) {
-                return;
-            }
-
-            if (hasOpened) {
-                handleUnexpectedFrameSocketClose();
-            }
-            stopFrameSending();
-
-            scheduleFrameSocketRetry(
-                activeSessionId,
-                stream,
-                hasOpened ? nextRetryAttempt : attempt,
-                connectionId,
-                showConnectingState || hasOpened,
-            );
-        });
-
-        socket.addEventListener("error", () => {
-            if (!hasOpened) {
-                socket.close();
-            }
-        });
-
-        socket.addEventListener("message", (event) => {
-            if (socketRef.current !== socket || typeof event.data !== "string") return;
-            try {
-                const message = JSON.parse(event.data) as { type?: unknown; sequenceNo?: unknown; retryable?: unknown };
-                if (typeof message.sequenceNo !== "number") return;
-                if (message.type === "frame_ack") {
-                    pendingFrameMessagesRef.current.delete(message.sequenceNo);
-                    return;
-                }
-                if (message.type !== "frame_nack") return;
-                const pending = pendingFrameMessagesRef.current.get(message.sequenceNo);
-                if (!pending || message.retryable !== true || socket.readyState !== WebSocket.OPEN) return;
-                if (pending.retries >= 3) {
-                    pendingFrameMessagesRef.current.delete(message.sequenceNo);
-                    setMessage("フレームの再送に失敗しました。接続を確認して再試行してください。");
-                    return;
-                }
-                pending.retries += 1;
-                socket.send(pending.payload);
-            } catch {
-                // Non-protocol server messages do not affect frame sending.
-            }
-        });
-    }
-
-    function handleUnexpectedFrameSocketClose() {
-        const wasPlaying = isPlayingRef.current;
-        const wasAnalyzing = isAnalysisActiveRef.current;
-        const wasCalibrating =
-            calibrationActiveRef.current ||
-            screenStateRef.current === "calibrating";
-
-        webSocketRecoveryPlaybackRef.current = wasPlaying;
-        pendingPlaybackAfterSocketOpenRef.current = wasPlaying;
-        pendingAnalysisAfterSocketOpenRef.current = wasAnalyzing;
-
-        if (wasPlaying) {
-            isPlayingRef.current = false;
-            setIsPlaying(false);
-            lessonVideoRef.current?.pause();
-            stopPlaybackTimer();
-            setScreenState("ws_connecting");
-        } else if (wasCalibrating) {
-            setScreenState("ws_connecting");
-        }
-
-        setMessage(
-            "WebSocketが切断されました。動画と解析を停止して再接続しています。",
-        );
-    }
-
-    function scheduleFrameSocketRetry(
-        activeSessionId: string,
-        stream: MediaStream,
-        attempt: number,
-        connectionId: number,
-        showConnectingState: boolean,
-    ) {
-        if (attempt >= maxWebSocketConnectAttempts) {
-            setIsWebSocketConnecting(false);
-            setWebSocketConnectAttempt(0);
-            isPlayingRef.current = false;
-            setIsPlaying(false);
-            lessonVideoRef.current?.pause();
-            stopPlaybackTimer();
-            stopFrameSending();
-            pendingPlaybackAfterSocketOpenRef.current = false;
-            pendingAnalysisAfterSocketOpenRef.current = false;
-            const wasCalibrating =
-                calibrationActiveRef.current ||
-                screenStateRef.current === "calibrating" ||
-                screenStateRef.current === "ws_connecting" &&
-                    !isCalibrationDoneRef.current;
-            calibrationActiveRef.current = false;
-            if (wasCalibrating) {
-                stopCalibrationTimer();
-            }
-            setScreenState(wasCalibrating ? "calibration_ready" : "error");
-            setMessage(
-                "WebSocket 接続に失敗しました。ネットワークまたはバックエンドの起動状態を確認してください。",
-            );
-            setIsWebSocketErrorOpen(true);
-            return;
-        }
-
-        const delayMs = webSocketBackoffBaseMs * 2 ** (attempt - 1);
-        webSocketRetryTimeoutRef.current = setTimeout(() => {
-            webSocketRetryTimeoutRef.current = null;
-            attemptFrameSocketConnection(
-                activeSessionId,
-                stream,
-                attempt + 1,
-                connectionId,
-                showConnectingState,
-            );
-        }, delayMs);
-    }
-
-    function retryFrameSocketConnection() {
+    function retryFrameUpload() {
         const activeSessionId = activeSessionIdRef.current;
         const stream = streamRef.current;
 
@@ -1427,7 +1149,7 @@ export default function StudentSessionPage() {
             return;
         }
 
-        setIsWebSocketErrorOpen(false);
+        setIsFrameUploadErrorOpen(false);
         if (!isCalibrationDoneRef.current) {
             if (calibrationStatus?.status === "failed") {
                 startCalibration();
@@ -1435,35 +1157,12 @@ export default function StudentSessionPage() {
             }
 
             setScreenState("calibration_ready");
-            connectFrameSocketWithRetry(activeSessionId, stream, false);
             return;
         }
 
-        const shouldResumePlayback =
-            webSocketRecoveryPlaybackRef.current &&
-            autoPauseStateRef.current === "idle";
-        pendingAnalysisAfterSocketOpenRef.current =
-            autoPauseStateRef.current !== "idle";
-        connectFrameSocketWithRetry(
-            activeSessionId,
-            stream,
-            shouldResumePlayback,
-        );
-    }
-
-    function clearWebSocketRetryTimer() {
-        if (webSocketRetryTimeoutRef.current) {
-            clearTimeout(webSocketRetryTimeoutRef.current);
-            webSocketRetryTimeoutRef.current = null;
+        if (autoPauseStateRef.current === "idle") {
+            startFrameSending(activeSessionId, stream);
         }
-    }
-
-    function buildFrameWebSocketUrl(activeSessionId: string) {
-        const baseUrl = new URL(apiBaseUrl);
-        baseUrl.protocol = baseUrl.protocol === "https:" ? "wss:" : "ws:";
-        baseUrl.pathname = `/ws/sessions/${activeSessionId}/frames`;
-        baseUrl.search = "";
-        return baseUrl.toString();
     }
 
     function ensureFrameSending(activeSessionId: string, stream: MediaStream) {
@@ -1510,18 +1209,22 @@ export default function StudentSessionPage() {
         canvas: HTMLCanvasElement,
         captureGeneration: number,
     ) {
-        const socket = socketRef.current;
         const video = cameraCaptureVideoRef.current;
 
         if (
             captureGeneration !== frameCaptureGenerationRef.current ||
-            sendingRef.current ||
             !isAnalysisActiveRef.current ||
-            !socket ||
-            socket.readyState !== WebSocket.OPEN ||
             !video ||
             video.readyState < 2
         ) {
+            return;
+        }
+
+        // Every capture tick consumes a sequence number. A busy request intentionally
+        // leaves a gap instead of building a client-side frame queue.
+        const sequenceNo = sequenceNoRef.current;
+        sequenceNoRef.current += 1;
+        if (sendingRef.current) {
             return;
         }
 
@@ -1535,48 +1238,45 @@ export default function StudentSessionPage() {
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
             const lessonVideo = lessonVideoRef.current;
             const videoTimeSec = lessonVideo ? getCurrentVideoTime(lessonVideo) : playbackPositionRef.current;
-            const payloadBase64 = await canvasToBase64(canvas);
+            const jpeg = await canvasToJpeg(canvas);
             if (
                 captureGeneration !== frameCaptureGenerationRef.current ||
-                !isAnalysisActiveRef.current ||
-                socketRef.current !== socket ||
-                socket.readyState !== WebSocket.OPEN
+                !isAnalysisActiveRef.current
             ) {
                 return;
             }
 
-            const sequenceNo = sequenceNoRef.current;
-            const serializedFrame = JSON.stringify({
+            const response = await postFrameWithRetry({
                 sessionId: activeSessionId,
                 sequenceNo,
                 capturedAt: new Date().toISOString(),
                 videoTimeSec,
-                codec: "image/jpeg",
-                payloadBase64,
+                jpeg,
             });
-            socket.send(serializedFrame);
-            pendingFrameMessagesRef.current.set(sequenceNo, { payload: serializedFrame, retries: 0 });
-            if (pendingFrameMessagesRef.current.size > 50) {
-                const oldestSequenceNo = pendingFrameMessagesRef.current.keys().next().value;
-                if (typeof oldestSequenceNo === "number") pendingFrameMessagesRef.current.delete(oldestSequenceNo);
+            if (response === "accepted") {
+                return;
             }
 
-            sequenceNoRef.current = sequenceNo + 1;
-        } catch (error) {
-            setScreenState("error");
-            setMessage(
-                error instanceof Error
-                    ? error.message
-                    : "フレーム送信中にエラーが発生しました。",
-            );
             stopFrameSending();
+            if (response === "unauthorized") {
+                sessionStorage.removeItem(studentSessionStorageKey);
+                window.location.assign("/student");
+                return;
+            }
+
+            setMessage(
+                response === "retry_exhausted"
+                    ? "フレーム送信を一時的に受け付けられませんでした。接続を確認して再試行してください。"
+                    : "フレーム送信が拒否されました。カメラ設定と受講セッションを確認してください。",
+            );
+            setIsFrameUploadErrorOpen(true);
         } finally {
             sendingRef.current = false;
         }
     }
 
-    function canvasToBase64(canvas: HTMLCanvasElement) {
-        return new Promise<string>((resolve, reject) => {
+    function canvasToJpeg(canvas: HTMLCanvasElement) {
+        return new Promise<Blob>((resolve, reject) => {
             canvas.toBlob(
                 (blob) => {
                     if (!blob) {
@@ -1588,26 +1288,7 @@ export default function StudentSessionPage() {
                         return;
                     }
 
-                    const reader = new FileReader();
-                    reader.addEventListener("load", () => {
-                        const result = reader.result;
-                        if (typeof result !== "string") {
-                            reject(
-                                new Error(
-                                    "フレーム画像の読み込みに失敗しました。",
-                                ),
-                            );
-                            return;
-                        }
-
-                        resolve(result.substring(result.indexOf(",") + 1));
-                    });
-                    reader.addEventListener("error", () =>
-                        reject(
-                            new Error("フレーム画像の読み込みに失敗しました。"),
-                        ),
-                    );
-                    reader.readAsDataURL(blob);
+                    resolve(blob);
                 },
                 "image/jpeg",
                 0.72,
@@ -1621,7 +1302,6 @@ export default function StudentSessionPage() {
         screenState === "ready" &&
         isCalibrationDone &&
         !isCalibrationOpen &&
-        !isWebSocketConnecting &&
         resultStreamState === "connected" &&
         autoPauseState === "idle";
     const controlsVisibilityClass = areControlsVisible
@@ -1699,7 +1379,6 @@ export default function StudentSessionPage() {
                         disabled={
                             isCalibrationOpen ||
                             !sessionId ||
-                            isWebSocketConnecting ||
                             resultStreamState !== "connected" ||
                             !isCalibrationDone ||
                             autoPauseState === "paused" ||
@@ -1789,42 +1468,28 @@ export default function StudentSessionPage() {
                 </div>
             )}
 
-            {isWebSocketConnecting && (
-                <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="flex flex-col items-center gap-2">
-                        <Spinner />
-                        <span>接続中</span>
-                        <span>
-                            {webSocketConnectAttempt}/
-                            {maxWebSocketConnectAttempts}
-                        </span>
-                    </div>
-                </div>
-            )}
-
             <Dialog
-                open={isWebSocketErrorOpen}
-                onOpenChange={setIsWebSocketErrorOpen}
+                open={isFrameUploadErrorOpen}
+                onOpenChange={setIsFrameUploadErrorOpen}
             >
                 <DialogContent className="w-full max-w-md">
                     <DialogHeader>
-                        <DialogTitle>WebSocket 接続エラー</DialogTitle>
+                        <DialogTitle>フレーム送信エラー</DialogTitle>
                         <DialogDescription>
-                            WebSocket
-                            接続を5回試行しましたが失敗しました。ネットワークまたはバックエンドの起動状態を確認してください。
+                            フレーム送信が完了しませんでした。ネットワークまたはバックエンドの起動状態を確認してください。
                         </DialogDescription>
                     </DialogHeader>
                     <DialogFooter>
                         <Button
                             variant="outline"
-                            onClick={() => setIsWebSocketErrorOpen(false)}
+                            onClick={() => setIsFrameUploadErrorOpen(false)}
                         >
                             閉じる
                         </Button>
                         <Button
                             onClick={() => {
-                                setIsWebSocketErrorOpen(false);
-                                retryFrameSocketConnection();
+                                setIsFrameUploadErrorOpen(false);
+                                retryFrameUpload();
                             }}
                         >
                             再試行
@@ -1952,7 +1617,6 @@ export default function StudentSessionPage() {
                             onClick={startCalibration}
                             disabled={
                                 screenState === "calibrating" ||
-                                isWebSocketConnecting ||
                                 resultStreamState !== "connected"
                             }
                         >
@@ -2000,6 +1664,59 @@ function getLessonDuration(
 
 function getCurrentVideoTime(video: HTMLVideoElement) {
     return Number.isFinite(video.currentTime) ? video.currentTime : 0;
+}
+
+type FrameUploadResult = "accepted" | "unauthorized" | "permanent_rejection" | "retry_exhausted";
+
+async function postFrameWithRetry(frame: {
+    sessionId: string;
+    sequenceNo: number;
+    capturedAt: string;
+    videoTimeSec: number;
+    jpeg: Blob;
+}): Promise<FrameUploadResult> {
+    for (let attempt = 1; attempt <= maxFrameUploadAttempts; attempt += 1) {
+        let response: Response;
+        try {
+            response = await apiFetch(buildFramePath(frame.sessionId, frame.sequenceNo), {
+                method: "POST",
+                headers: {
+                    "Content-Type": "image/jpeg",
+                    "X-Frame-Captured-At": frame.capturedAt,
+                    "X-Frame-Video-Time-Sec": String(frame.videoTimeSec),
+                },
+                body: frame.jpeg,
+            });
+        } catch {
+            if (attempt < maxFrameUploadAttempts) {
+                await delayFrameRetry(undefined, attempt);
+                continue;
+            }
+            return "retry_exhausted";
+        }
+
+        if (response.status === 202) {
+            return "accepted";
+        }
+        if (response.status === 401 || response.status === 403) {
+            return "unauthorized";
+        }
+        if (response.status !== 429 && response.status !== 503) {
+            return "permanent_rejection";
+        }
+        if (attempt < maxFrameUploadAttempts) {
+            await delayFrameRetry(response, attempt);
+        }
+    }
+    return "retry_exhausted";
+}
+
+async function delayFrameRetry(response: Response | undefined, attempt: number) {
+    const retryAfterSec = Number(response?.headers.get("Retry-After"));
+    const delayMs = Number.isFinite(retryAfterSec) && retryAfterSec >= 0
+        ? retryAfterSec * 1000
+        : frameUploadBackoffBaseMs * 2 ** (attempt - 1);
+    await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delayMs));
 }
 
 async function sendPlaybackEvent(
@@ -2139,6 +1856,10 @@ function buildPlaybackEventsPath(sessionId: string) {
     url.pathname = `/api/sessions/${sessionId}/playback-events`;
     url.search = "";
     return `${url.pathname}${url.search}`;
+}
+
+function buildFramePath(sessionId: string, sequenceNo: number) {
+    return `/api/sessions/${encodeURIComponent(sessionId)}/frames/${sequenceNo}`;
 }
 
 function buildCalibrationPath(sessionId: string) {

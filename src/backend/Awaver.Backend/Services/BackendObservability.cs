@@ -21,6 +21,9 @@ public sealed class BackendObservability : IAnalysisResultObservability, IAnalys
     private readonly Histogram<double> outboxDeliveryDuration;
     private readonly Histogram<double> outboxMarkDuration;
     private readonly Histogram<double> outboxBatchDuration;
+    private readonly Counter<long> frameIngressRequests;
+    private readonly Histogram<double> frameIngressDuration;
+    private readonly Counter<long> frameIngressAcceptedBytes;
     private long undeliveredCount;
     private long oldestUndeliveredAgeMilliseconds;
 
@@ -34,6 +37,9 @@ public sealed class BackendObservability : IAnalysisResultObservability, IAnalys
         outboxDeliveryDuration = meter.CreateHistogram<double>("awaver.backend.outbox.delivery.duration", unit: "ms", description: "Per-event outbox delivery duration.");
         outboxMarkDuration = meter.CreateHistogram<double>("awaver.backend.outbox.mark.duration", unit: "ms", description: "Outbox delivery/failure marking duration.");
         outboxBatchDuration = meter.CreateHistogram<double>("awaver.backend.outbox.batch.duration", unit: "ms", description: "Outbox dispatch batch duration.");
+        frameIngressRequests = meter.CreateCounter<long>("awaver.backend.frame_ingress.requests", description: "HTTP binary frame ingress requests by fixed outcome.");
+        frameIngressDuration = meter.CreateHistogram<double>("awaver.backend.frame_ingress.duration", unit: "ms", description: "HTTP binary frame ingress duration by fixed outcome.");
+        frameIngressAcceptedBytes = meter.CreateCounter<long>("awaver.backend.frame_ingress.accepted_bytes", unit: "By", description: "Bytes durably accepted by HTTP binary frame ingress.");
         _ = meter.CreateObservableGauge<long>("awaver.backend.outbox.undelivered.count", () => Volatile.Read(ref undeliveredCount), description: "Current undelivered outbox record count for this backend instance.");
         _ = meter.CreateObservableGauge<long>("awaver.backend.outbox.oldest_undelivered.age", () => Volatile.Read(ref oldestUndeliveredAgeMilliseconds), unit: "ms", description: "Age of the oldest undelivered outbox record for this backend instance; zero when none exist.");
     }
@@ -47,6 +53,14 @@ public sealed class BackendObservability : IAnalysisResultObservability, IAnalys
 
     public void RecordStage(string stage, TimeSpan duration) =>
         analysisResultStageDuration.Record(duration.TotalMilliseconds, new TagList { { "stage", stage } });
+
+    public void RecordFrameIngress(string outcome, TimeSpan duration, int acceptedBytes = 0)
+    {
+        var tags = new TagList { { "outcome", outcome } };
+        frameIngressRequests.Add(1, tags);
+        frameIngressDuration.Record(duration.TotalMilliseconds, tags);
+        if (acceptedBytes > 0) frameIngressAcceptedBytes.Add(acceptedBytes, tags);
+    }
 
     public void RecordClaim(TimeSpan duration, string outcome, int claimedCount)
     {

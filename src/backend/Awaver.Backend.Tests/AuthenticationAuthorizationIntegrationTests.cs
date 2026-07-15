@@ -201,6 +201,83 @@ public sealed class AuthenticationAuthorizationIntegrationTests
         Assert.Equal(HttpStatusCode.Created, resume.StatusCode);
     }
 
+    [Fact]
+    public async Task StudentFrameIngress_DurablyAcceptsOnlyTheAuthorizedBinaryFrameAndTreatsAnExactRetryAsSuccess()
+    {
+        await using var factory = new BackendApplicationFactory();
+        using var client = factory.CreateSecureClient();
+        var start = await client.PostAsJsonAsync("/api/sessions", new { studentId = "frame-student" });
+        var sessionId = JsonDocument.Parse(await start.Content.ReadAsStringAsync()).RootElement.GetProperty("sessionId").GetGuid();
+        ApplySessionCookies(client, start, AuthCookieOptions.StudentCookieName);
+
+        using var first = FrameRequest(sessionId, 1, [0xff, 0xd8, 0xff, 0xd9]);
+        using var accepted = await client.SendAsync(first);
+        Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
+
+        using var retry = FrameRequest(sessionId, 1, [0xff, 0xd8, 0xff, 0xd9]);
+        using var duplicate = await client.SendAsync(retry);
+        Assert.Equal(HttpStatusCode.Accepted, duplicate.StatusCode);
+
+        using var conflictRequest = FrameRequest(sessionId, 1, [0xff, 0xd8, 0xff, 0x01, 0xff, 0xd9]);
+        using var conflict = await client.SendAsync(conflictRequest);
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+
+        var queue = factory.Services.GetRequiredService<RecordingFrameQueue>();
+        Assert.Single(queue.Messages);
+        Assert.Equal(sessionId, queue.Messages.Single().SessionId);
+        Assert.Equal(1, queue.Messages.Single().SequenceNo);
+        Assert.Equal("image/jpeg", queue.Messages.Single().Codec);
+    }
+
+    [Fact]
+    public async Task StudentFrameIngress_RejectsMissingCsrfInvalidMetadataOversizeAndUnavailableQueue()
+    {
+        await using var factory = new BackendApplicationFactory();
+        using var client = factory.CreateSecureClient();
+        var start = await client.PostAsJsonAsync("/api/sessions", new { studentId = "frame-validation" });
+        var sessionId = JsonDocument.Parse(await start.Content.ReadAsStringAsync()).RootElement.GetProperty("sessionId").GetGuid();
+        ApplySessionCookies(client, start, AuthCookieOptions.StudentCookieName);
+
+        client.DefaultRequestHeaders.Remove(AuthCookieOptions.CsrfHeaderName);
+        using (var csrfRequest = FrameRequest(sessionId, 1, [0xff, 0xd8, 0xff, 0xd9]))
+        using (var csrfResponse = await client.SendAsync(csrfRequest))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, csrfResponse.StatusCode);
+        }
+        client.DefaultRequestHeaders.Add(AuthCookieOptions.CsrfHeaderName, CookieValue(start, AuthCookieOptions.CsrfCookieName));
+
+        using (var invalidMetadata = FrameRequest(sessionId, 1, [0xff, 0xd8, 0xff, 0xd9], videoTimeSec: "-1"))
+        using (var invalidResponse = await client.SendAsync(invalidMetadata))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, invalidResponse.StatusCode);
+        }
+
+        using (var oversized = FrameRequest(sessionId, 1, [.. new byte[FrameIngressRequest.MaxJpegBytes + 1]]))
+        using (var oversizedResponse = await client.SendAsync(oversized))
+        {
+            Assert.Equal(HttpStatusCode.RequestEntityTooLarge, oversizedResponse.StatusCode);
+        }
+
+        factory.Services.GetRequiredService<RecordingFrameQueue>().FailNext = true;
+        using (var unavailable = FrameRequest(sessionId, 1, [0xff, 0xd8, 0xff, 0xd9]))
+        using (var unavailableResponse = await client.SendAsync(unavailable))
+        {
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailableResponse.StatusCode);
+        }
+    }
+
+    private static HttpRequestMessage FrameRequest(Guid sessionId, int sequenceNo, byte[] payload, string videoTimeSec = "12.5")
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, $"/api/sessions/{sessionId}/frames/{sequenceNo}")
+        {
+            Content = new ByteArrayContent(payload),
+        };
+        request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/jpeg");
+        request.Headers.Add("X-Frame-Captured-At", "2026-07-15T09:00:00.000Z");
+        request.Headers.Add("X-Frame-Video-Time-Sec", videoTimeSec);
+        return request;
+    }
+
     private static void ApplySessionCookies(HttpClient client, HttpResponseMessage response, string sessionCookieName = AuthCookieOptions.ProductionCookieName)
     {
         client.DefaultRequestHeaders.Remove("Cookie");
@@ -233,6 +310,14 @@ public sealed class AuthenticationAuthorizationIntegrationTests
                 services.RemoveAll<IDbContextOptionsConfiguration<AwaverDbContext>>();
                 services.RemoveAll<AwaverDbContext>();
                 services.AddDbContext<AwaverDbContext>(options => options.UseInMemoryDatabase(databaseName));
+                services.RemoveAll<IFrameStorage>();
+                services.RemoveAll<IFrameQueue>();
+                services.RemoveAll<FramePipeline>();
+                services.AddSingleton<RecordingFrameStorage>();
+                services.AddSingleton<IFrameStorage>(provider => provider.GetRequiredService<RecordingFrameStorage>());
+                services.AddSingleton<RecordingFrameQueue>();
+                services.AddSingleton<IFrameQueue>(provider => provider.GetRequiredService<RecordingFrameQueue>());
+                services.AddSingleton<FramePipeline>();
             });
         }
 
@@ -247,6 +332,62 @@ public sealed class AuthenticationAuthorizationIntegrationTests
         {
             await using var scope = Services.CreateAsyncScope();
             await seed(scope.ServiceProvider.GetRequiredService<AwaverDbContext>());
+        }
+    }
+
+    private sealed class RecordingFrameStorage : IFrameStorage
+    {
+        private readonly Dictionary<string, StoredFrame> frames = [];
+
+        public Task<FrameStorageWriteResult> SaveAsync(ReceivedFrame frame, CancellationToken cancellationToken)
+        {
+            var blobPath = FrameBlobPath.Create(frame);
+            var stored = new StoredFrame(frame, Accepted: false);
+            lock (frames)
+            {
+                if (!frames.TryGetValue(blobPath, out var existing))
+                {
+                    frames.Add(blobPath, stored);
+                    return Task.FromResult(new FrameStorageWriteResult(blobPath, AlreadyAccepted: false));
+                }
+                if (!SameFrame(existing.Frame, frame)) throw new FrameIngressConflictException();
+                return Task.FromResult(new FrameStorageWriteResult(blobPath, existing.Accepted));
+            }
+        }
+
+        public Task MarkAcceptedAsync(ReceivedFrame frame, CancellationToken cancellationToken)
+        {
+            var blobPath = FrameBlobPath.Create(frame);
+            lock (frames)
+            {
+                var existing = frames[blobPath];
+                if (!SameFrame(existing.Frame, frame)) throw new FrameIngressConflictException();
+                frames[blobPath] = existing with { Accepted = true };
+            }
+            return Task.CompletedTask;
+        }
+
+        private static bool SameFrame(ReceivedFrame left, ReceivedFrame right) =>
+            left.CapturedAt == right.CapturedAt && left.VideoTimeSec == right.VideoTimeSec &&
+            left.Codec == right.Codec && left.Payload.AsSpan().SequenceEqual(right.Payload);
+
+        private sealed record StoredFrame(ReceivedFrame Frame, bool Accepted);
+    }
+
+    private sealed class RecordingFrameQueue : IFrameQueue
+    {
+        public List<FrameQueueMessage> Messages { get; } = [];
+        public bool FailNext { get; set; }
+
+        public Task EnqueueAsync(FrameQueueMessage message, CancellationToken cancellationToken)
+        {
+            if (FailNext)
+            {
+                FailNext = false;
+                throw new FrameIngressDependencyException("Service Bus", new TimeoutException());
+            }
+            Messages.Add(message);
+            return Task.CompletedTask;
         }
     }
 }

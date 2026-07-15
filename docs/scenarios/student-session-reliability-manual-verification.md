@@ -20,7 +20,7 @@
 2. Backend／Worker接続確認、WebSocket、SignalRがそれぞれ「接続済み」になり、キャリブレーション開始ボタンが有効になることを確認する。
 3. 顔を正面から外した状態で開始する。失敗通知と指定の失敗文言が表示され、動画が再生されないことを確認する。
 4. カメラ位置と顔の向きを調整して再度開始する。Workerの`succeeded`通知を受信後にだけキャリブレーションPopupが閉じ、動画が再生されることを確認する。
-5. WebSocketの送信メッセージが `sessionId`、増加する `sequenceNo`、UTCの `capturedAt`、0以上の有限値である `videoTimeSec`、`codec: image/jpeg`、`payloadBase64` を含み、各payloadが単独でデコード可能なJPEGであることを確認する。キャリブレーション再試行で`sequenceNo`が1へ戻らないことも確認する。
+5. `POST /api/sessions/{sessionId}/frames/{sequenceNo}` が、認証CookieとCSRF header、UTCの`X-Frame-Captured-At`、0以上の有限値の`X-Frame-Video-Time-Sec`、`Content-Type: image/jpeg`のraw JPEG bodyを送ることを確認する。Sessionごとに1 requestだけがin-flightで、busy tickはframeを蓄積せずsequenceの欠番としてskipし、retry時は同じsequence、metadata、bytesを使うことを確認する。
 
 ## 再生状態・受講完了イベント
 

@@ -54,11 +54,11 @@
 13. フロントエンドが画面全面の動画Frameを表示する。
 14. 受講者の操作が3秒間ない場合、フロントエンドがHeaderとFooterを150msでfade-outして非表示にする。非表示時に操作があった場合は150msでfade-inして表示する。
 15. フロントエンドがBackendとWorkerの起動状態を確認する。
-16. フロントエンドが動画再生画面で、当該受講セッションに結び付いた認証情報とともに `/ws/sessions/{sessionId}/frames` へ接続し、SignalRで同一セッションの解析結果を購読する。
+16. フロントエンドが動画再生画面で、当該受講セッションに結び付いた認証CookieとCSRF headerを使ってFeature 03のHTTP binary frame APIへ送信し、SignalRで同一セッションの解析結果を購読する。
 17. フロントエンドが動画Frame上にキャリブレーションモーダルを表示し、カメラ画角を表示する。
 18. 受講者が開始ボタンを押す。
 19. BackendとWorkerの起動確認および接続に成功した場合のみ、フロントエンドがキャリブレーション指示とWorker進捗を表示する。
-20. フロントエンドがキャリブレーション用の単独でデコード可能な `image/jpeg` フレームを、WebSocketで1フレームずつ送信する。各JSONには `sessionId`、`sequenceNo`、UTCの `capturedAt`、0以上の有限値である `videoTimeSec`、`codec: image/jpeg`、`payloadBase64` を含める。
+20. フロントエンドがキャリブレーション用の単独でデコード可能な `image/jpeg` frameを、`POST /api/sessions/{sessionId}/frames/{sequenceNo}` のraw bodyとして1枚ずつ送信する。metadataはrouteとUTCの`X-Frame-Captured-At`、0以上の有限値の`X-Frame-Video-Time-Sec`、`Content-Type: image/jpeg`で伝え、同一Sessionではdurable `202`まで次frameを送らない。
 21. Workerからキャリブレーション成功通知を受信後、フロントエンドがモーダルを閉じ、画面中央に再生ボタンを表示する。
 22. 受講者が中央の再生ボタンを押す。
 23. フロントエンドが動画再生を開始し、カメラ画角画像の送信を継続する。

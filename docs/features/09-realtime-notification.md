@@ -9,6 +9,8 @@
 
 Workerが算出した眠気スコア、および顔未検出などのトラッキング状態を、Backendの永続化済みOutboxとSignalRを経由してフロントエンドへリアルタイム通知する機能である。
 
+SignalRは解析結果通知専用であり、raw JPEG frameの送受信経路ではない。frame ingressのHTTP binary契約、再送、順序および欠番の一次情報は[`03-video-frame-sending.md`](./03-video-frame-sending.md)を正とする。SignalR内部のtransportがWebSocketを選択しても、この区別は変わらない。
+
 SignalRは本機能の最終仕様であり、受講者画面（`student-session-page.tsx`）の一次通知経路である。バックエンドは `AddSignalR` によるASP.NET Core SignalR Hub（`AnalysisEventsHub`、`/hubs/analysis-events`）を提供する。Azure本番で複数Backend instanceを配置する場合は、`Azure:SignalR:ConnectionString` / `AZURE_SIGNALR_CONNECTION_STRING` を設定し、`AddAzureSignalR` によりAzure SignalR Serviceを配信基盤として利用する。接続文字列が未設定のローカル単一instance開発環境では、同一プロセス内のASP.NET Core SignalRとして動作する。複数instanceの接続registryとOutbox配信契約は [`15-elastic-session-frame-processing.md`](./15-elastic-session-frame-processing.md) を一次情報とする。
 
 `GET /api/sessions/{sessionId}/analysis-events` のServer-Sent Eventsは、`/test` ページなどローカル検証用ツール向けのフォールバック経路として残す。SSEの `data:` に含めるJSON payloadはSignalR payloadと同じ構造とし、`POST /api/sessions/{sessionId}/analysis-results` で受理・Outbox保存された後に両経路へ配信する。
@@ -151,7 +153,7 @@ Backendは `AnalysisEventsHub` による認証済みSignalR接続・配信基盤
 
 管理者・教員のブラウザ認証Cookieと `student_session` は同一ブラウザで共存させない。`POST /api/sessions` は既存の管理者・教員認証および旧student sessionをサーバー側で失効させ、対応するCookieを削除してから新しい `student_session` を発行する。管理者・教員ログインも既存のstudent sessionを同様に失効させる。
 
-学生画面は、画面が保持する `sessionId` と `student_session` Cookieに束縛されたprincipalのsession IDを照合する。`sessionStorage` の値だけでWebSocket、Hub、REST APIの認可を成立させてはならない。同じブラウザで新しいstudent sessionが開始された場合、旧タブのCookieはサーバー側で失効するため、旧タブは次回の認証確認またはイベント送信でエラー画面へ遷移する。
+学生画面は、画面が保持する `sessionId` と `student_session` Cookieに束縛されたprincipalのsession IDを照合する。`sessionStorage` の値だけでHTTP frame ingress、SignalR Hub、REST APIの認可を成立させてはならない。同じブラウザで新しいstudent sessionが開始された場合、旧タブのCookieはサーバー側で失効するため、旧タブは次回の認証確認またはイベント送信でエラー画面へ遷移する。
 
 logout、明示的revoke、idle expiry、absolute expiryで `auth_sessions` が無効になった接続は、既にGroupへ参加済みでも以後の解析イベント配信対象から除外する。Hub invocation時の認可確認に加えて、配信時にも接続のauth session有効性を確認する。再接続後は `JoinSession(sessionId)` が成功するまで接続済み・受講再開可能状態へ戻さない。
 

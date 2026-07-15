@@ -19,6 +19,7 @@ flowchart TD
     T4 --> T6
     T5 --> T7[07 統合検証]
     T6 --> T7
+    T7 --> T8[08 HTTP frame ingress化とACA Backend移管]
 ```
 
 ## ファイル一覧
@@ -34,6 +35,7 @@ flowchart TD
 | 5 | [`05-azure-infrastructure-autoscale.md`](./05-azure-infrastructure-autoscale.md) | Azure IaC、運用ドキュメント |
 | 6 | [`06-configurable-load-test.md`](./06-configurable-load-test.md) | 負荷試験ツール、fixture、実行ドキュメント |
 | 7 | [`07-integration-and-acceptance.md`](./07-integration-and-acceptance.md) | scenario統合テスト、最終修正、検証報告 |
+| 8 | [`08-http-frame-ingress-and-aca-backend.md`](./08-http-frame-ingress-and-aca-backend.md) | Feature / Scenario更新、HTTP binary frame API、Frontend / load-test切替、raw frame WebSocket撤廃、ACA Backend IaC・運用・検証 |
 
 ## 並列実行
 
@@ -49,8 +51,9 @@ flowchart TD
 - `01a`・`04` → `05`: 実際の設定名と実行方式をIaCへ反映するため。
 - `01a`・`04` → `06`: 独立JPEGと複数instance通知を負荷試験対象にするため。
 - `05`・`06` → `07`: 最後にscenario単位で統合確認するため。
+- `07` → `08`: Task 08はframe transportという外部契約をWebSocket / Base64からHTTP binaryへ変更し、Backend実行基盤もApp ServiceからACAへ移管するため、既存の統合契約が安定してから実施する。
 
-同じBackendファイル、とくに `Program.cs`、`AwaverDbContext.cs`、migration、`AnalysisOutboxDispatcher.cs` を複数Agentに同時編集させないこと。
+Task 08の最終成果物では、raw JPEG frame用WebSocketを残さず、SignalRは解析結果通知専用として維持する。同じBackendファイル、とくに `Program.cs`、`AwaverDbContext.cs`、migration、`AnalysisOutboxDispatcher.cs` を複数Agentに同時編集させないこと。
 
 ## 共通完了条件
 

@@ -8,7 +8,7 @@ test("summarizes counters and frame-to-result latency percentiles", () => {
     metrics.increment("framesOffered");
     metrics.increment("framesSent");
     metrics.increment("framesNotSentDueToInFlightLimit");
-    metrics.increment("acknowledgements");
+    metrics.increment("acceptedFrames");
     metrics.recordLatency(10);
     metrics.recordLatency(20);
     metrics.recordLatency(30);
@@ -20,7 +20,7 @@ test("summarizes counters and frame-to-result latency percentiles", () => {
     assert.equal(summary.framesOffered, 1);
     assert.equal(summary.framesSent, 1);
     assert.equal(summary.framesNotSentDueToInFlightLimit, 1);
-    assert.equal(summary.acknowledgements, 1);
+    assert.equal(summary.acceptedFrames, 1);
     assert.equal(summary.totalDurationMs, 1234);
     assert.deepEqual(summary.frameToResultLatencyMs, { samples: 4, p50: 20, p95: 40, max: 40 });
 });

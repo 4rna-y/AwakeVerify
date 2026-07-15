@@ -22,7 +22,7 @@ pnpm exec playwright install --with-deps chromium
 pnpm test:e2e
 ```
 
-テスト開始時に Backend health と Worker health を確認します。Worker は起動時に Backend、Service Bus、Blob Storage、Redis への接続を確認してから `/health` を公開するため、この preflight により解析パイプラインの依存サービスが利用可能な状態であることを確認します。テスト本体は、学籍番号でのログイン、受講セッション作成、Web カメラ権限、Backend／Worker の接続確認、WebSocket／SignalR 接続、キャリブレーション開始可能状態までを検証します。
+テスト開始時に Backend health と Worker health を確認します。Worker は起動時に Backend、Service Bus、Blob Storage、Redis への接続を確認してから `/health` を公開するため、この preflight により解析パイプラインの依存サービスが利用可能な状態であることを確認します。テスト本体は、学籍番号でのログイン、受講セッション作成、Web カメラ権限、Backend／Worker の接続確認、HTTP binary frame ingress／SignalR 接続、キャリブレーション開始可能状態までを検証します。
 
 接続先を変える場合は、以下を指定できます。
 

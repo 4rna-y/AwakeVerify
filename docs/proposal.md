@@ -18,20 +18,19 @@ TK240047生山匡太
 3.1. クライアント層（データ取得・動画再生）
 ・WebカメラでユーザーのWebカメラ映像をキャプチャ（640×480・5fps）
 ・Next.js上のプレーヤーコンポーネントがオンデマンド動画の再生を制御
-・WebSocket経由でAzure App Serviceへ映像フレームをストリーミング送信
+・HTTPS binary frame API経由でAzure Container Apps上のBackendへ映像フレームを送信
 ・SignalR受信により眠気レベルをリアルタイムに表示・動画停止を実行
 3.2. Azureクラウド層（推論・記録・通知）
-・顔画像パイプライン: App Service → Blob Storage → Service Bus → Container Apps
-Worker → PostgreSQL
+・顔画像パイプライン: Backend Container Apps → Blob Storage → Service Bus → Container Apps
+Worker → Backend / PostgreSQL
 ・ダッシュボード配信: 眠気スコア（1秒単位）・自動停止イベントをAzure SignalR Service経
 由でリアルタイムに管理ダッシュボードへ配信
 4. 動作フロー
 4.1. 顔画像パイプライン
 受講者が学籍番号を入力してセッションを開始すると、ブラウザはgetUserMedia APIで
-Webカメラを起動し、640×480・5fpsのJPEGフレームをWebSocket経由でApp Service
-へ継続的に送信する。App Serviceはフレームを受け取り次第、推論完了を待たず即時
-レスポンスを返しながら、非同期でBlob Storageへ保存する。保存完了後はBlob参照情
-報をService Busへエンキューし、Container Apps WorkerがMediaPipe Face
+Webカメラを起動し、640×480・5fpsの独立JPEGフレームをHTTPS binary requestでBackend
+Container Appsへ送信する。BackendはBlob Storage保存とService Bus enqueueの両方を完了した
+durable acceptance時だけ`202 Accepted`を返す。Container Apps WorkerがMediaPipe Face
 Landmarkerでフレームから顔ランドマークを取得してEAR・Pitch・Yawを算出する。算出
 値はRedis上のスライディングウィンドウを用いてPERCLOSベースの眠気スコアに変換
 され、SignalRを用いてクライアントへリアルタイム通知されるとともに、5フレームの平均
@@ -71,15 +70,15 @@ NHTSA標準のPERCLOSにPitch角（前傾増幅）とYaw角（信頼性減衰）
 リプトで原子的（LPUSH・LTRIM・LRANGE）に更新。Workerのスケールアウト時の競合を防
 ぐ。
 ・Service BusによるAPIレスポンス性確保
-App Serviceは推論完了を待たずに即時レスポンスを返す非同期設計。推論はContainer
+Backendは推論完了を待たず、Blob保存とqueue enqueueのdurable acceptance後に応答する非同期設計。推論はContainer
 Apps Workerがキューから非同期で処理し、API応答性を一定に維持する。
 
 7.  使用する技術
 表2. 使用ライブラリ
 | 領域          | 技術・ライブラリ                      |     | Azureサービス                |
 | ----------- | ----------------------------- | --- | ------------------------ |
-| フロントエンド     | Next.js, TypeScript, SignalR  |     | App Service              |
-| バックエンド      | ASP.NET Core, WebSocket       |     | App Service              |
+| フロントエンド     | Next.js, TypeScript, SignalR  |     | -                        |
+| バックエンド      | ASP.NET Core, HTTPS binary API |     | Container Apps           |
 | 画像推論Worker  | Python, MediaPipe, OpenCV     |     | Container Apps           |
 | メッセージキュー    |                               | -   | Service Bus              |
 | 画像保管        |                               | -   | Blob Storage             |

@@ -33,6 +33,7 @@ Workerは、Service Busから映像フレーム参照を受信し、Blob Storage
 - 正面向き判定は `|Yaw_deg| <= 15` かつ `|Pitch_deg| <= 15` とする。
 - 顔未検出フレームはPERCLOS計算に含めず、顔未検出通知を送信する。
 - Session単位の水平分散、Session slot、graceful shutdown、autoscaleの受け入れ条件は [`15-elastic-session-frame-processing.md`](../features/15-elastic-session-frame-processing.md) を正とする。
+- Workerはframe upload endpointを呼ばない。ACA環境では `WORKER_BACKEND_BASE_URL` をBackend ACA ingressへ設定し、Workerが接続するBackend HTTP endpointは`/health/ready`とサービス認証済み`/api/sessions/{sessionId}/analysis-results`だけとする。
 
 ## 3. 処理概要
 

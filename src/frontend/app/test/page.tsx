@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { apiFetch } from "@/lib/api-client";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -19,7 +20,7 @@ const frameIntervalMs = 200;
 const maxRecentEvents = 20;
 
 type RuntimeState = "idle" | "starting" | "running" | "paused" | "error";
-type SocketState = "idle" | "connecting" | "connected" | "closed" | "error";
+type FrameTransportState = "idle" | "sending" | "paused" | "error";
 type ResultStreamState =
     | "idle"
     | "connecting"
@@ -84,8 +85,8 @@ export default function WorkerPipelineTestPage() {
     const [studentId, setStudentId] = useState(() => buildDefaultStudentId());
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [runtimeState, setRuntimeState] = useState<RuntimeState>("idle");
-    const [frameSocketState, setFrameSocketState] =
-        useState<SocketState>("idle");
+    const [frameTransportState, setFrameTransportState] =
+        useState<FrameTransportState>("idle");
     const [resultStreamState, setResultStreamState] =
         useState<ResultStreamState>("idle");
     const [message, setMessage] = useState<string | null>(null);
@@ -102,7 +103,6 @@ export default function WorkerPipelineTestPage() {
     const videoRef = useRef<HTMLVideoElement | null>(null);
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const streamRef = useRef<MediaStream | null>(null);
-    const frameSocketRef = useRef<WebSocket | null>(null);
     const resultEventSourceRef = useRef<EventSource | null>(null);
     const frameIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const sequenceNoRef = useRef(1);
@@ -116,7 +116,6 @@ export default function WorkerPipelineTestPage() {
                 clearInterval(frameIntervalRef.current);
                 frameIntervalRef.current = null;
             }
-            frameSocketRef.current?.close();
             resultEventSourceRef.current?.close();
             streamRef.current?.getTracks().forEach((track) => track.stop());
         };
@@ -139,7 +138,10 @@ export default function WorkerPipelineTestPage() {
             attachCameraStream(stream);
 
             connectResultStream(activeSessionId);
-            connectFrameSocket(activeSessionId);
+            runningRef.current = true;
+            setFrameTransportState("sending");
+            setRuntimeState("running");
+            startFrameSending(activeSessionId);
         } catch (error) {
             setRuntimeState("error");
             setMessage(toErrorMessage(error));
@@ -150,18 +152,20 @@ export default function WorkerPipelineTestPage() {
     function pausePipeline() {
         runningRef.current = false;
         setRuntimeState("paused");
+        setFrameTransportState("paused");
         stopFrameSending();
     }
 
     function resumePipeline() {
         const activeSessionId = sessionId;
-        if (!activeSessionId || frameSocketRef.current?.readyState !== WebSocket.OPEN) {
+        if (!activeSessionId) {
             setRuntimeState("error");
-            setMessage("セッションまたはフレーム送信用 WebSocket が初期化されていません。");
+            setMessage("受講セッションが初期化されていません。");
             return;
         }
 
         runningRef.current = true;
+        setFrameTransportState("sending");
         setRuntimeState("running");
         startFrameSending(activeSessionId);
     }
@@ -169,13 +173,9 @@ export default function WorkerPipelineTestPage() {
     function stopPipeline() {
         runningRef.current = false;
         stopFrameSending();
-        frameSocketRef.current?.close();
-        frameSocketRef.current = null;
         resultEventSourceRef.current?.close();
         resultEventSourceRef.current = null;
-        setFrameSocketState((current) =>
-            current === "idle" ? "idle" : "closed",
-        );
+        setFrameTransportState((current) => current === "idle" ? "idle" : "paused");
         setResultStreamState((current) =>
             current === "idle" ? "idle" : "closed",
         );
@@ -183,11 +183,10 @@ export default function WorkerPipelineTestPage() {
     }
 
     async function createSession(activeStudentId: string) {
-        const response = await fetch(`${apiBaseUrl}/api/sessions`, {
+        const response = await apiFetch("/api/sessions", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ studentId: activeStudentId.trim() }),
-            credentials: "include",
         });
 
         if (!response.ok) {
@@ -230,36 +229,6 @@ export default function WorkerPipelineTestPage() {
         video.srcObject = stream;
         void video.play().catch((error: unknown) => {
             console.warn("カメラプレビューを開始できませんでした。", error);
-        });
-    }
-
-    function connectFrameSocket(activeSessionId: string) {
-        frameSocketRef.current?.close();
-        setFrameSocketState("connecting");
-
-        const socket = new WebSocket(buildFrameWebSocketUrl(activeSessionId));
-        frameSocketRef.current = socket;
-
-        socket.addEventListener("open", () => {
-            setFrameSocketState("connected");
-            setRuntimeState("running");
-            runningRef.current = true;
-            startFrameSending(activeSessionId);
-        });
-
-        socket.addEventListener("close", () => {
-            setFrameSocketState("closed");
-            runningRef.current = false;
-            stopFrameSending();
-            setRuntimeState((current) =>
-                current === "running" || current === "starting" ? "paused" : current,
-            );
-        });
-
-        socket.addEventListener("error", () => {
-            setFrameSocketState("error");
-            setRuntimeState("error");
-            setMessage("フレーム送信用 WebSocket でエラーが発生しました。");
         });
     }
 
@@ -307,7 +276,6 @@ export default function WorkerPipelineTestPage() {
         canvas.width = 640;
         canvas.height = 480;
         canvasRef.current = canvas;
-        sequenceNoRef.current = 1;
 
         frameIntervalRef.current = setInterval(() => {
             void captureAndSendFrame(activeSessionId, canvas);
@@ -325,14 +293,11 @@ export default function WorkerPipelineTestPage() {
         activeSessionId: string,
         canvas: HTMLCanvasElement,
     ) {
-        const socket = frameSocketRef.current;
         const video = videoRef.current;
 
         if (
             sendingRef.current ||
             !runningRef.current ||
-            !socket ||
-            socket.readyState !== WebSocket.OPEN ||
             !video ||
             video.readyState < 2
         ) {
@@ -348,25 +313,16 @@ export default function WorkerPipelineTestPage() {
 
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
             const videoTimeSec = Number.isFinite(video.currentTime) && video.currentTime >= 0 ? video.currentTime : 0;
-            const payloadBase64 = await canvasToBase64(canvas);
             const sequenceNo = sequenceNoRef.current;
-
-            socket.send(
-                JSON.stringify({
-                    sessionId: activeSessionId,
-                    sequenceNo,
-                    capturedAt: new Date().toISOString(),
-                    videoTimeSec,
-                    codec: "image/jpeg",
-                    payloadBase64,
-                }),
-            );
-
             sequenceNoRef.current = sequenceNo + 1;
+            const jpeg = await canvasToJpeg(canvas);
+            const accepted = await postFrame(activeSessionId, sequenceNo, new Date().toISOString(), videoTimeSec, jpeg);
+            if (!accepted) throw new Error("フレーム送信が受理されませんでした。");
             setSentFrames((current) => current + 1);
         } catch (error) {
             setRuntimeState("error");
             setMessage(toErrorMessage(error));
+            setFrameTransportState("error");
             runningRef.current = false;
             stopFrameSending();
         } finally {
@@ -377,7 +333,7 @@ export default function WorkerPipelineTestPage() {
     const isRunning = runtimeState === "running";
     const isStarting = runtimeState === "starting";
     const canStart = runtimeState === "idle" || runtimeState === "paused" || runtimeState === "error";
-    const canResume = runtimeState === "paused" && frameSocketState === "connected";
+    const canResume = runtimeState === "paused" && sessionId !== null;
 
     return (
         <main className="min-h-screen bg-background p-6 text-foreground">
@@ -386,12 +342,12 @@ export default function WorkerPipelineTestPage() {
                     <div>
                         <h1 className="text-2xl font-semibold">Worker pipeline test</h1>
                         <p className="text-sm text-muted-foreground">
-                            カメラフレームを backend の WebSocket へ送信し、worker 解析結果を backend のイベントストリームから表示します。
+                            カメラフレームを backend の HTTPS binary API へ送信し、worker 解析結果を backend のイベントストリームから表示します。
                         </p>
                     </div>
                     <div className="flex flex-wrap gap-2">
                         <Badge variant="secondary">runtime: {runtimeState}</Badge>
-                        <Badge variant="secondary">frame WS: {frameSocketState}</Badge>
+                        <Badge variant="secondary">frame HTTP: {frameTransportState}</Badge>
                         <Badge variant="secondary">result: {resultStreamState}</Badge>
                         <Badge variant={calibration?.status === "failed" ? "destructive" : "secondary"}>
                             calibration: {calibration?.status ?? "pending"}
@@ -618,14 +574,6 @@ function buildDefaultStudentId() {
     return `test-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}`;
 }
 
-function buildFrameWebSocketUrl(sessionId: string) {
-    const url = new URL(apiBaseUrl);
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    url.pathname = `/ws/sessions/${sessionId}/frames`;
-    url.search = "";
-    return url.toString();
-}
-
 function buildAnalysisEventsUrl(sessionId: string) {
     const url = new URL(apiBaseUrl);
     url.pathname = `/api/sessions/${sessionId}/analysis-events`;
@@ -651,8 +599,8 @@ function parseAnalysisEvent(value: string): AnalysisEvent | null {
     }
 }
 
-function canvasToBase64(canvas: HTMLCanvasElement) {
-    return new Promise<string>((resolve, reject) => {
+function canvasToJpeg(canvas: HTMLCanvasElement) {
+    return new Promise<Blob>((resolve, reject) => {
         canvas.toBlob(
             (blob) => {
                 if (!blob) {
@@ -660,25 +608,36 @@ function canvasToBase64(canvas: HTMLCanvasElement) {
                     return;
                 }
 
-                const reader = new FileReader();
-                reader.addEventListener("load", () => {
-                    const result = reader.result;
-                    if (typeof result !== "string") {
-                        reject(new Error("フレーム画像の読み込みに失敗しました。"));
-                        return;
-                    }
-
-                    resolve(result.substring(result.indexOf(",") + 1));
-                });
-                reader.addEventListener("error", () =>
-                    reject(new Error("フレーム画像の読み込みに失敗しました。")),
-                );
-                reader.readAsDataURL(blob);
+                resolve(blob);
             },
             "image/jpeg",
             0.72,
         );
     });
+}
+
+async function postFrame(
+    sessionId: string,
+    sequenceNo: number,
+    capturedAt: string,
+    videoTimeSec: number,
+    jpeg: Blob,
+): Promise<boolean> {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/frames/${sequenceNo}`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "image/jpeg",
+                "X-Frame-Captured-At": capturedAt,
+                "X-Frame-Video-Time-Sec": String(videoTimeSec),
+            },
+            body: jpeg,
+        });
+        if (response.status === 202) return true;
+        if (response.status !== 429 && response.status !== 503) return false;
+        if (attempt < 3) await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 500 * 2 ** (attempt - 1)));
+    }
+    return false;
 }
 
 function toErrorMessage(error: unknown) {

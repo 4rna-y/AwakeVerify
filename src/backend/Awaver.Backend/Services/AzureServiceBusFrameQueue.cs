@@ -16,6 +16,13 @@ public sealed class AzureServiceBusFrameQueue(ServiceBusSender sender) : IFrameQ
             MessageId = $"{message.SessionId}:{message.SequenceNo}",
         };
 
-        await sender.SendMessageAsync(serviceBusMessage, cancellationToken);
+        try
+        {
+            await sender.SendMessageAsync(serviceBusMessage, cancellationToken);
+        }
+        catch (ServiceBusException exception)
+        {
+            throw new FrameIngressDependencyException("Service Bus", exception);
+        }
     }
 }

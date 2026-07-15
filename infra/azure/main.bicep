@@ -21,23 +21,30 @@ param backendImageRepository string = 'awaver-backend'
 @description('Worker image repository in the public OCI registry.')
 param workerImageRepository string = 'awaver-worker'
 
-@description('Image tag deployed to Backend and Worker after publication to the public OCI registry.')
-param imageTag string = 'test'
-
-@description('App Service Plan SKU for the Backend. It must support WebSockets and the requested instance count. The non-production parameter file uses S1.')
-param backendPlanSkuName string = 'P1v3'
+@description('Immutable image tag deployed to Backend and Worker after publication to the public OCI registry. Do not use mutable tags such as latest.')
+param imageTag string = 'replace-with-immutable-tag'
 
 @minValue(1)
-@description('Minimum Backend App Service Plan instances. The non-production parameter file keeps two instances warm for burst tests.')
+@description('Minimum Backend ACA replicas. The non-production parameter file keeps two replicas warm for burst tests after ACA quota and credit approval.')
 param backendMinInstances int = 1
 
 @minValue(1)
-@description('Maximum Backend App Service Plan instances. The non-production parameter file sets this to two, so CPU autoscale cannot delay the initial burst capacity.')
+@description('Maximum Backend ACA routing replicas. This value is passed to BACKEND_EXPECTED_INSTANCE_COUNT.')
 param backendMaxInstances int = 2
 
 @minValue(1)
-@description('Average CPU percentage at which the Backend App Service Plan scales out.')
-param backendCpuScaleOutThreshold int = 70
+@description('HTTP concurrent-request target for the Backend ACA scale rule. Tune from frame ingress and analysis-result measurements; do not derive it from a fixed session count.')
+param backendHttpConcurrentRequests int = 20
+
+@minValue(1)
+@description('Seconds granted to a Backend ACA replica for graceful shutdown before termination.')
+param backendTerminationGracePeriodSeconds int = 60
+
+@description('Container Apps CPU cores allocated to each Backend replica.')
+param backendCpu int = 1
+
+@description('Container Apps memory allocated to each Backend replica.')
+param backendMemory string = '2Gi'
 
 @minValue(0)
 param workerMinReplicas int = 0
@@ -76,6 +83,9 @@ param serviceBusMaxDeliveryCount int = 10
 
 @description('ISO 8601 Service Bus session/message lock duration.')
 param serviceBusLockDuration string = 'PT1M'
+
+@description('ISO 8601 Service Bus duplicate-detection history window. It must cover the maximum HTTP frame retry horizon for a stable (sessionId, sequenceNo) message ID.')
+param serviceBusDuplicateDetectionHistoryTimeWindow string = 'PT1H'
 
 @description('Globally unique Storage account name for frame and video containers.')
 @minLength(3)
@@ -132,6 +142,9 @@ param managedRedisSkuName string = 'Balanced_B0'
 @description('Frontend origin permitted by Backend CORS, including scheme and no trailing slash.')
 param frontendOrigin string
 
+@description('CIDR of the trusted ACA ingress proxy network that is allowed to supply X-Forwarded-For and X-Forwarded-Proto to Backend. Do not use 0.0.0.0/0.')
+param backendForwardedHeadersKnownNetwork string
+
 @description('Microsoft Entra authority for Backend Worker bearer-token validation.')
 param workerEntraAuthority string
 
@@ -170,7 +183,6 @@ param tags object = {
 
 var serviceBusNamespaceName = '${namePrefix}-servicebus'
 var signalrName = '${namePrefix}-signalr'
-var backendPlanName = '${namePrefix}-backend-plan'
 var backendAppName = '${namePrefix}-backend'
 var containerEnvironmentName = '${namePrefix}-cae'
 var workerAppName = '${namePrefix}-worker'
@@ -338,6 +350,8 @@ resource frameQueue 'Microsoft.ServiceBus/namespaces/queues@2022-10-01-preview' 
   name: 'frame-processing-queue'
   properties: {
     requiresSession: true
+    requiresDuplicateDetection: true
+    duplicateDetectionHistoryTimeWindow: serviceBusDuplicateDetectionHistoryTimeWindow
     lockDuration: serviceBusLockDuration
     maxDeliveryCount: serviceBusMaxDeliveryCount
     deadLetteringOnMessageExpiration: true
@@ -471,184 +485,205 @@ resource signalr 'Microsoft.SignalRService/SignalR@2023-02-01' = {
   }
 }
 
-resource backendPlan 'Microsoft.Web/serverfarms@2023-12-01' = if (deployWorkloads) {
-  name: backendPlanName
-  location: location
-  sku: {
-    name: backendPlanSkuName
-    capacity: backendMinInstances
-  }
-  tags: tags
-  properties: {
-    reserved: true
-  }
-}
-
-resource backendApp 'Microsoft.Web/sites@2023-12-01' = if (deployWorkloads) {
+resource backendContainerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkloads) {
   name: backendAppName
   location: location
-  kind: 'app,linux,container'
   identity: {
     type: 'SystemAssigned'
   }
   tags: tags
   properties: {
-    serverFarmId: backendPlan!.id
-    httpsOnly: true
-    clientAffinityEnabled: false
-    siteConfig: {
-      linuxFxVersion: 'DOCKER|${backendImage}'
-      alwaysOn: true
-      healthCheckPath: '/health/ready'
-      webSocketsEnabled: true
-      http20Enabled: true
-      ftpsState: 'Disabled'
-      minTlsVersion: '1.2'
-      appSettings: [
+    managedEnvironmentId: containerEnvironment.id
+    configuration: {
+      activeRevisionsMode: 'Single'
+      ingress: {
+        external: true
+        targetPort: 8080
+        transport: 'http'
+        allowInsecure: false
+        traffic: [
+          {
+            latestRevision: true
+            weight: 100
+          }
+        ]
+      }
+      secrets: [
         {
-          name: 'WEBSITES_PORT'
-          value: '8080'
-        }
-        {
-          name: 'ASPNETCORE_ENVIRONMENT'
-          value: 'Production'
-        }
-        {
-          name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+          name: 'backend-application-insights'
           value: backendApplicationInsights.properties.ConnectionString
         }
         {
-          name: 'BACKEND_EXPECTED_INSTANCE_COUNT'
-          value: string(backendExpectedInstanceCount)
-        }
-        {
-          name: 'DATABASE_CONNECTION_STRING'
+          name: 'backend-database-connection'
+          // This string is derived from the secure PostgreSQL password parameter and is stored only as an ACA secret.
+          #disable-next-line use-secure-value-for-secure-inputs
           value: databaseConnectionString
         }
         {
-          name: 'BLOB_CONNECTION_STRING'
+          name: 'backend-blob-connection'
           value: backendBlobConnectionString
         }
         {
-          name: 'AZURE_BLOB_STORAGE_CONTAINER_NAME'
-          value: frameContainerName
-        }
-        {
-          name: 'SERVICEBUS_CONNECTION_STRING'
+          name: 'backend-servicebus-connection'
           value: backendSenderRule.listKeys().primaryConnectionString
         }
         {
-          name: 'AZURE_SERVICE_BUS_FRAME_QUEUE_NAME'
-          value: frameQueue.name
-        }
-        {
-          name: 'REDIS_CONNECTION_STRING'
+          name: 'backend-redis-connection'
           value: redisConnectionString
         }
         {
-          name: 'AZURE_SIGNALR_CONNECTION_STRING'
+          name: 'backend-signalr-connection'
           value: signalr.listKeys().primaryConnectionString
-        }
-        {
-          name: 'Worker__AuthMode'
-          value: 'entra_id'
-        }
-        {
-          name: 'Worker__Entra__Authority'
-          value: workerEntraAuthority
-        }
-        {
-          name: 'Worker__Entra__Audience'
-          value: workerEntraAudience
-        }
-        {
-          name: 'Worker__Entra__ValidIssuer'
-          value: workerEntraValidIssuer
-        }
-        {
-          name: 'OUTBOX_BATCH_SIZE'
-          value: string(outboxBatchSize)
-        }
-        {
-          name: 'OUTBOX_POLL_INTERVAL_MS'
-          value: string(outboxPollIntervalMs)
-        }
-        {
-          name: 'OUTBOX_LEASE_SECONDS'
-          value: string(outboxLeaseSeconds)
-        }
-        {
-          name: 'FRAME_BLOB_RETENTION_DAYS'
-          value: string(frameBlobRetentionDays)
-        }
-        {
-          name: 'Cors__AllowedOrigins__0'
-          value: frontendOrigin
         }
       ]
     }
-  }
-}
-
-
-
-resource backendAutoscale 'Microsoft.Insights/autoscaleSettings@2022-10-01' = if (deployWorkloads) {
-  name: '${backendPlanName}-cpu-autoscale'
-  location: location
-  tags: tags
-  properties: {
-    enabled: true
-    targetResourceUri: backendPlan.id
-    profiles: [
-      {
-        name: 'default-cpu-profile'
-        capacity: {
-          minimum: string(backendMinInstances)
-          maximum: string(backendMaxInstances)
-          default: string(backendMinInstances)
+    template: {
+      terminationGracePeriodSeconds: backendTerminationGracePeriodSeconds
+      containers: [
+        {
+          name: 'backend'
+          image: backendImage
+          resources: {
+            cpu: backendCpu
+            memory: backendMemory
+          }
+          env: [
+            {
+              name: 'ASPNETCORE_ENVIRONMENT'
+              value: 'Production'
+            }
+            {
+              name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+              secretRef: 'backend-application-insights'
+            }
+            {
+              name: 'BACKEND_EXPECTED_INSTANCE_COUNT'
+              value: string(backendExpectedInstanceCount)
+            }
+            {
+              name: 'DATABASE_CONNECTION_STRING'
+              secretRef: 'backend-database-connection'
+            }
+            {
+              name: 'BLOB_CONNECTION_STRING'
+              secretRef: 'backend-blob-connection'
+            }
+            {
+              name: 'AZURE_BLOB_STORAGE_CONTAINER_NAME'
+              value: frameContainerName
+            }
+            {
+              name: 'SERVICEBUS_CONNECTION_STRING'
+              secretRef: 'backend-servicebus-connection'
+            }
+            {
+              name: 'AZURE_SERVICE_BUS_FRAME_QUEUE_NAME'
+              value: frameQueue.name
+            }
+            {
+              name: 'REDIS_CONNECTION_STRING'
+              secretRef: 'backend-redis-connection'
+            }
+            {
+              name: 'AZURE_SIGNALR_CONNECTION_STRING'
+              secretRef: 'backend-signalr-connection'
+            }
+            {
+              name: 'Worker__AuthMode'
+              value: 'entra_id'
+            }
+            {
+              name: 'Worker__Entra__Authority'
+              value: workerEntraAuthority
+            }
+            {
+              name: 'Worker__Entra__Audience'
+              value: workerEntraAudience
+            }
+            {
+              name: 'Worker__Entra__ValidIssuer'
+              value: workerEntraValidIssuer
+            }
+            {
+              name: 'OUTBOX_BATCH_SIZE'
+              value: string(outboxBatchSize)
+            }
+            {
+              name: 'OUTBOX_POLL_INTERVAL_MS'
+              value: string(outboxPollIntervalMs)
+            }
+            {
+              name: 'OUTBOX_LEASE_SECONDS'
+              value: string(outboxLeaseSeconds)
+            }
+            {
+              name: 'FRAME_BLOB_RETENTION_DAYS'
+              value: string(frameBlobRetentionDays)
+            }
+            {
+              name: 'Cors__AllowedOrigins__0'
+              value: frontendOrigin
+            }
+            {
+              name: 'ForwardedHeaders__KnownNetworks__0'
+              value: backendForwardedHeadersKnownNetwork
+            }
+          ]
+          probes: [
+            {
+              type: 'Startup'
+              httpGet: {
+                path: '/health/live'
+                port: 8080
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 1
+              periodSeconds: 5
+              timeoutSeconds: 3
+              failureThreshold: 20
+            }
+            {
+              type: 'Liveness'
+              httpGet: {
+                path: '/health/live'
+                port: 8080
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 30
+              periodSeconds: 10
+              timeoutSeconds: 3
+              failureThreshold: 3
+            }
+            {
+              type: 'Readiness'
+              httpGet: {
+                path: '/health/ready'
+                port: 8080
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 10
+              timeoutSeconds: 3
+              failureThreshold: 3
+            }
+          ]
         }
+      ]
+      scale: {
+        minReplicas: backendMinInstances
+        maxReplicas: backendMaxInstances
         rules: [
           {
-            metricTrigger: {
-              metricName: 'CpuPercentage'
-              metricResourceUri: backendPlan.id
-              metricNamespace: 'microsoft.web/serverfarms'
-              statistic: 'Average'
-              timeAggregation: 'Average'
-              timeGrain: 'PT1M'
-              timeWindow: 'PT5M'
-              operator: 'GreaterThan'
-              threshold: backendCpuScaleOutThreshold
-            }
-            scaleAction: {
-              direction: 'Increase'
-              type: 'ChangeCount'
-              value: '1'
-              cooldown: 'PT5M'
-            }
-          }
-          {
-            metricTrigger: {
-              metricName: 'CpuPercentage'
-              metricResourceUri: backendPlan.id
-              metricNamespace: 'microsoft.web/serverfarms'
-              statistic: 'Average'
-              timeAggregation: 'Average'
-              timeGrain: 'PT1M'
-              timeWindow: 'PT10M'
-              operator: 'LessThan'
-              threshold: max(1, backendCpuScaleOutThreshold / 2)
-            }
-            scaleAction: {
-              direction: 'Decrease'
-              type: 'ChangeCount'
-              value: '1'
-              cooldown: 'PT10M'
+            name: 'http-concurrent-requests'
+            http: {
+              metadata: {
+                concurrentRequests: string(backendHttpConcurrentRequests)
+              }
             }
           }
         ]
       }
-    ]
+    }
   }
 }
 
@@ -703,11 +738,11 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkload
             }
             {
               name: 'WORKER_BACKEND_BASE_URL'
-              value: 'https://${backendApp!.properties.defaultHostName}'
+              value: 'https://${backendContainerApp!.properties.configuration.ingress.fqdn}'
             }
             {
               name: 'WORKER_BACKEND_HEALTH_URL'
-              value: 'https://${backendApp!.properties.defaultHostName}/health/ready'
+              value: 'https://${backendContainerApp!.properties.configuration.ingress.fqdn}/health/ready'
             }
             {
               name: 'WORKER_BACKEND_TOKEN_SCOPE'
@@ -812,6 +847,7 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkload
 output containerImageRegistry string = containerImageRegistry
 output backendImageReference string = backendImage
 output workerImageReference string = workerImage
+output backendContainerAppFqdn string = deployWorkloads ? backendContainerApp!.properties.configuration.ingress.fqdn : ''
 output postgresServerHost string = '${postgres.name}.postgres.database.azure.com'
 output redisHost string = '${redis.name}.redis.cache.windows.net'
 output serviceBusNamespace string = serviceBusNamespace.name

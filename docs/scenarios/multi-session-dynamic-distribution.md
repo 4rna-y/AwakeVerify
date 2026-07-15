@@ -26,7 +26,7 @@
 - Worker は Blob Storage、Service Bus、Redis、Backend 解析結果 API に接続できる。
 - Azure 本番で複数 Backend instance を使用する場合、Azure SignalR Service と共有接続 registry が設定済みである。
 - Worker の Session 並列度、Worker min/max replica、queue scale threshold、Outbox batch/poll/lease、Blob 保持期間は、[`15-elastic-session-frame-processing.md`](../features/15-elastic-session-frame-processing.md) の設定契約を満たす環境設定と IaC により与えられている。
-- 各Sessionは、単独でデコード可能な `image/jpeg` フレームを送信できる。WebSocket JSONには `sessionId`、`sequenceNo`、UTCの `capturedAt`、0以上の有限値である `videoTimeSec`、`codec: image/jpeg`、`payloadBase64` を含める。キャリブレーション、眠気判定式、認証・認可は既存Featureのままとする。
+- 各Sessionは、Feature 03の `POST /api/sessions/{sessionId}/frames/{sequenceNo}` へ、認証CookieとCSRF headerを伴う単独でデコード可能な `image/jpeg` binary bodyを送信できる。metadata、size制限、status、冪等性および再送はFeature 03を正とする。Sessionごとに最大1 requestをin-flightにし、capture tickでskipしたsequenceの欠番を許容する。キャリブレーション、眠気判定式、認証・認可は既存Featureのままとする。
 
 ## 4. Feature path
 
@@ -41,8 +41,8 @@
 ## 5. 正常系 E2E フロー
 
 1. 複数の受講者がそれぞれ異なる `sessionId` で受講を開始し、各 Session が5fps相当のフレームを送信する。
-2. 各受講者のフロントエンドは、既存の WebSocket payload と認証 Cookie を使い、対応する Session へフレームを送信する。
-3. いずれかの Backend instance がフレームを受信し、`receivedAt` を付与して Blob へ保存する。
+2. 各受講者のフロントエンドは、対応するSessionのHTTPS binary frame APIへ認証CookieとCSRF headerを伴うraw JPEGを送信する。前requestがin-flightのcapture tickはqueueせずskipし、retry可能な応答だけを同一sequence、metadata、bytesで再送する。
+3. いずれかの Backend instance がフレームを受信し、`receivedAt` を付与して Blob へ保存する。Blob保存とSession queueへのenqueueの両方が完了したときだけ`202 Accepted`を返す。
 4. Backend は Blob 保存成功後、`sessionId` を Service Bus Session ID とするフレーム参照メッセージを Session 有効 queue へ投入する。
 5. Worker の複数 Session slot または複数 Worker replica が、異なる Session を並列に取得する。
 6. 各 slot は所有した一つの Session のフレームを `sequenceNo` 順に直列処理する。同一 Session のフレームを複数 slot で同時処理しない。
@@ -54,7 +54,7 @@
 
 ## 6. 期待結果・受け入れ条件
 
-- 各 Session のフレーム処理順は `sequenceNo` 順であり、Session 間の処理完了順は拘束しない。
+- 各 Session のフレーム処理順は、clientの1 in-flight制約によりenqueueされた `sequenceNo` 順であり、capture skipによる欠番は後続frameを妨げない。Session 間の処理完了順は拘束しない。
 - 同一Session内のキャリブレーション、PERCLOS、解析結果の既存契約と直列処理が維持される。
 - 異なる Session の処理が複数 slot/replica に分散し、単一 Worker または単一 Backend instance への固定割当にならない。
 - Worker からの再送、Outbox の crash 境界による再試行でも、解析結果は既存の冪等キーにより重複保存されない。通知は at-least-once のため重複受信を許容する。

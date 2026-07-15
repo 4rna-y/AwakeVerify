@@ -3,11 +3,10 @@ export type Summary = {
     framesOffered: number;
     framesSent: number;
     framesNotSentDueToInFlightLimit: number;
-    acknowledgements: number;
-    negativeAcknowledgements: number;
+    acceptedFrames: number;
+    retryableRejections: number;
+    permanentRejections: number;
     retransmissions: number;
-    webSocketConnectionFailures: number;
-    webSocketReconnects: number;
     signalRReconnects: number;
     analysisResultsReceived: number;
     crossSessionDeliveries: number;
@@ -29,11 +28,10 @@ export class Metrics {
         framesOffered: 0,
         framesSent: 0,
         framesNotSentDueToInFlightLimit: 0,
-        acknowledgements: 0,
-        negativeAcknowledgements: 0,
+        acceptedFrames: 0,
+        retryableRejections: 0,
+        permanentRejections: 0,
         retransmissions: 0,
-        webSocketConnectionFailures: 0,
-        webSocketReconnects: 0,
         signalRReconnects: 0,
         analysisResultsReceived: 0,
         crossSessionDeliveries: 0,

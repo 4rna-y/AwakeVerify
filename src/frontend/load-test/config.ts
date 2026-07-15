@@ -10,16 +10,14 @@ export type LoadTestConfig = {
     allowAzureLoadTest: boolean;
     rampUpSeconds: number;
     resultTimeoutSeconds: number;
-    maxInFlightFrames: number;
     outputPath: string;
     faultInjection: ReadonlySet<FaultInjection>;
 };
 
-export type FaultInjection = "signalr-reconnect" | "ws-reconnect" | "skip-sequence" | "duplicate-frame";
+export type FaultInjection = "signalr-reconnect" | "skip-sequence" | "duplicate-frame";
 
 const faultInjectionValues: ReadonlySet<string> = new Set([
     "signalr-reconnect",
-    "ws-reconnect",
     "skip-sequence",
     "duplicate-frame",
 ]);
@@ -33,7 +31,6 @@ const defaults = {
     allowAzureLoadTest: false,
     rampUpSeconds: 0,
     resultTimeoutSeconds: 15,
-    maxInFlightFrames: 5,
     outputPath: "load-test-results/report.json",
 } as const;
 
@@ -51,7 +48,6 @@ export function loadConfig(
         allowAzureLoadTest: parseBoolean(env.ALLOW_AZURE_LOAD_TEST, "ALLOW_AZURE_LOAD_TEST", defaults.allowAzureLoadTest),
         rampUpSeconds: nonNegativeInteger(env.RAMP_UP_SECONDS, "RAMP_UP_SECONDS", defaults.rampUpSeconds),
         resultTimeoutSeconds: positiveInteger(env.RESULT_TIMEOUT_SECONDS, "RESULT_TIMEOUT_SECONDS", defaults.resultTimeoutSeconds),
-        maxInFlightFrames: positiveInteger(env.MAX_IN_FLIGHT_FRAMES, "MAX_IN_FLIGHT_FRAMES", defaults.maxInFlightFrames),
         outputPath: resolve(cwd, env.OUTPUT_PATH ?? defaults.outputPath),
         faultInjection: parseFaultInjection(env.FAULT_INJECTION),
     };

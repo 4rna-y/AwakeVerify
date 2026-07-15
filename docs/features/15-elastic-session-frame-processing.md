@@ -9,7 +9,7 @@
 
 Backend、Worker、Outbox、SignalR配信を、受講セッション単位で弾力的にスケールする機能である。対象は、環境ごとに設定した最小・最大 replica 数および Azure クォータの範囲内での水平スケールであり、無限の同時利用を保証するものではない。
 
-本書はセッション単位の分散、停止・障害時の引継ぎ、Outbox の複数 dispatcher、複数 Backend instance における通知配信、スケールおよび保持期間の一次情報とする。フレーム payload、眠気判定式、認証・認可、Service Bus の個別再試行分類は既存 Feature を変更しない。
+本書はセッション単位の分散、停止・障害時の引継ぎ、Outbox の複数 dispatcher、複数 Backend instance における通知配信、スケールおよび保持期間の一次情報とする。frame ingressのHTTP binary payload、status、再送および受理境界は[`03-video-frame-sending.md`](./03-video-frame-sending.md)を正とし、raw JPEG frame用WebSocketまたはBase64 payloadを復活させない。眠気判定式、認証・認可、Service Bus の個別再試行分類は既存 Feature を変更しない。
 
 ## 2. 対象コンポーネント
 
@@ -34,6 +34,7 @@ Backend、Worker、Outbox、SignalR配信を、受講セッション単位で弾
 
 - 同時利用者数を仕様上の固定値にしない。処理可能な規模は環境設定、実行基盤の能力および Azure クォータで決まる。
 - `sessionId` は、フレーム順序保証、Worker の所有権、および水平分散の単位である。
+- ClientはSessionごとに最大1本のin-flight HTTP frame requestだけを許可し、durable `202` を得るまで次のsequenceを送らない。capture tickでskipしたsequenceの欠番は許容する。この送信側制約によりBackendは同一Sessionのframeをsequence順にenqueueし、HTTP/2のstream完了順には依存しない。
 - Backend は各フレームの `sessionId` を Service Bus メッセージの Session ID に設定し、Session 有効 queue へ投入する。フレーム永続化・message 形式・冪等性は [`04-frame-storage-and-queue.md`](./04-frame-storage-and-queue.md) を正とする。
 - 同じ `sessionId` のフレームは、一時点に一つの Worker Session slot だけが `sequenceNo` 順に直列処理する。Worker replica 内外を問わず、同じ Session を並列処理してはならない。
 - 異なる `sessionId` は、異なる Session slot または異なる Worker replica で並列処理できる。特定の Session が特定の Worker に恒久的に割り当てられることは保証しない。
@@ -51,7 +52,7 @@ Backend、Worker、Outbox、SignalR配信を、受講セッション単位で弾
 
 ## 6. Backend、Outbox、リアルタイム通知の分散
 
-- Backend は複数 instance で稼働でき、WebSocket 受信、解析結果受理、Outbox dispatcher のいずれも特定の instance へ固定しない。
+- Backend は複数 instance で稼働でき、HTTPS binary frame ingress、解析結果受理、Outbox dispatcher のいずれも特定の instance へ固定しない。
 - SignalR 接続と Session 購読の registry はプロセス内メモリだけに依存してはならない。registry は複数 Backend instance から参照できる共有ストアに接続 ID、購読 `sessionId`、auth session の識別子、有効期限を保持する。切断、`LeaveSession`、auth session の失効時には共有 registry から取り除く。
 - 通知送信時には、共有 registry の購読情報と auth session の有効性を再確認する。失効、revoke、期限切れした auth session の接続は通知対象にしない。Hub の参加認可と payload 契約は [`09-realtime-notification.md`](./09-realtime-notification.md) を変更しない。
 - Azure 本番で複数 Backend instance を配置する場合、Azure SignalR Service を必須の配信基盤とする。ローカル開発の単一 Backend instance は ASP.NET Core SignalR を使用できる。

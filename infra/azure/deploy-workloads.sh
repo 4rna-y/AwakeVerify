@@ -5,7 +5,12 @@ workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 resource_group="${AZURE_RESOURCE_GROUP:?Set AZURE_RESOURCE_GROUP to awaver-devtest-rg}"
 parameters_file="${AZURE_PARAMETERS_FILE:?Set AZURE_PARAMETERS_FILE to the ignored secure parameters file}"
 deployment_name="${AZURE_DEPLOYMENT_NAME:-awaver-workloads-$(date +%Y%m%d%H%M%S)}"
-image_tag="${AZURE_IMAGE_TAG:-test}"
+image_tag="${AZURE_IMAGE_TAG:?Set AZURE_IMAGE_TAG to a published immutable GHCR tag}"
+
+if [[ "$image_tag" == "latest" || "$image_tag" == "test" || "$image_tag" == *"<"* || "$image_tag" == *">"* ]]; then
+    echo "AZURE_IMAGE_TAG must be a published immutable GHCR tag, not $image_tag" >&2
+    exit 1
+fi
 
 if [[ ! -f "$parameters_file" ]]; then
     echo "AZURE_PARAMETERS_FILE does not exist: $parameters_file" >&2

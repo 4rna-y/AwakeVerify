@@ -4,7 +4,7 @@
 
 本仕様書は、オンデマンドビデオ教材受講完了検証システムにおけるバックエンドの仕様を定義する。
 
-バックエンドは、受講セッション管理、認証、WebSocket映像受信、Blob Storage保存、Service Bus投入、PostgreSQL記録、SignalR配信、管理者ダッシュボード向けAPIを担う。
+バックエンドは、受講セッション管理、認証、HTTPS binary frame ingress、Blob Storage保存、Service Bus投入、PostgreSQL記録、SignalR配信、管理者ダッシュボード向けAPIを担う。
 
 ## 2. 根拠
 
@@ -12,9 +12,9 @@
 
 ### 2.1 proposal.md に基づく事項
 
-- バックエンド技術は ASP.NET Core / WebSocket とする。
-- Azure App Service 上で動作する。
-- フロントエンドからWebSocket経由で映像データを受信する。
+- バックエンド技術は ASP.NET Core とする。
+- Azure Container Apps上で動作する。
+- フロントエンドからHTTPS binary requestで映像データを受信する。
 - 受信データをBlob Storageへ保存する。
 - Blob参照情報をService Busへエンキューする。
 - Workerの推論完了を待たず、非同期処理する。
@@ -27,7 +27,7 @@
 - 教員は教員IDとパスワードでログインする。
 - 教員アカウントは管理者ページから追加する。
 - バックエンドは受講ごとに `sessionId` を発行する。
-- WebSocketでは、各フレームを単独でデコード可能な `image/jpeg` として1フレームずつ受信する。
+- Feature 03のHTTPS binary frame APIで、各フレームを単独でデコード可能な `image/jpeg` として1フレームずつ受信する。raw JPEG frame用WebSocketおよびBase64 payloadは提供しない。
 - Service Busでは `sessionId` をSession IDとして利用し、同一セッション内の順序処理を保証する。
 - 停止・再開イベントはフロントエンドからAPIで受信し、PostgreSQLへ保存する。
 - ローカルE2EはdevcontainerのPostgreSQL / Redis / Azurite / Azure Service Bus Emulatorを使用し、本番と同じBlob／Service Busアダプターを通す。ファイル保存・ログ出力のみのフォールバックは単体テストのtest doubleに限る。詳細は [`04-frame-storage-and-queue.md`](../features/04-frame-storage-and-queue.md) を参照する。
@@ -41,7 +41,7 @@
 - 受講者の学籍番号管理
 - 教員ログイン認証
 - 管理者による教員アカウント追加
-- WebSocketによる映像フレーム受信
+- HTTPS binary frame ingress
 - Blob Storageへの映像フレーム保存
 - Service Busへのフレーム参照メッセージ投入
 - 停止・再開イベント保存
@@ -63,7 +63,7 @@
 
 認証、パスワードハッシュ、Cookie属性、期限、ログアウト、CSRF、role境界の一次情報は [`12-teacher-login.md`](../features/12-teacher-login.md)、[`13-teacher-account-management.md`](../features/13-teacher-account-management.md)、[`09-realtime-notification.md`](../features/09-realtime-notification.md) とする。
 
-Backendはサーバー側 `auth_sessions` と不透明なHttpOnly Cookieを実装する。教員は `teacher` role、管理者は `admin` role、受講開始APIが発行する短命Cookieは `student_session` roleを持つ。Controller、Hub、WebSocket endpointは認証principalから認可し、request bodyの `adminId` / `teacherId` / `sessionId` を認可根拠にしない。別オリジン開発を許可する場合は、固定したCORS originに資格情報送信と `X-CSRF-Token` レスポンスヘッダー公開を限定し、認証Cookieを発行する応答と認証済み `GET /api/auth/me` でCSRF値を返す。
+Backendはサーバー側 `auth_sessions` と不透明なHttpOnly Cookieを実装する。教員は `teacher` role、管理者は `admin` role、受講開始APIが発行する短命Cookieは `student_session` roleを持つ。Controller、Hub、HTTP frame ingressは認証principalから認可し、request bodyの `adminId` / `teacherId` / `sessionId` を認可根拠にしない。別オリジン開発を許可する場合は、固定したCORS originに資格情報送信と `X-CSRF-Token` レスポンスヘッダー公開を限定し、認証Cookieを発行する応答と認証済み `GET /api/auth/me` でCSRF値を返す。
 
 ## 5. REST API仕様
 
@@ -90,7 +90,7 @@ response:
 }
 ```
 
-Backendは同時に、この `sessionId` に限定した `student_session` HttpOnly Cookieを設定する。WebSocket、解析イベント購読、停止・再開イベント記録では当該Cookieの `sessionId` 一致を必須とする。
+Backendは同時に、この `sessionId` に限定した `student_session` HttpOnly Cookieを設定する。HTTP frame ingress、解析イベント購読、停止・再開イベント記録では当該Cookieの `sessionId` 一致を必須とする。
 
 `student_session` と管理者・教員のブラウザ認証Cookieは共存させない。`POST /api/sessions` は既存のauth sessionを失効・削除してからstudent cookieを発行し、管理者・教員ログインは既存student sessionを失効・削除する。画面が保持するsession IDは表示・照合用に限り、認可根拠にはしない。
 
@@ -183,63 +183,29 @@ request:
 3. パスワードをハッシュ化する。
 4. `teachers` に保存する。
 
-## 6. WebSocket映像受信仕様
+## 6. HTTP binary frame ingress仕様
 
-### 6.1 接続先
+Frame transportの一次契約は[`03-video-frame-sending.md`](../features/03-video-frame-sending.md)を正とする。本節はBackendの実装責務だけを補足し、raw JPEG frame用WebSocket route、frame ACK/NACK、JSON/Base64 payloadを提供しない。
 
-```text
-/ws/sessions/{sessionId}/frames
+```http
+POST /api/sessions/{sessionId}/frames/{sequenceNo}
+Content-Type: image/jpeg
+X-CSRF-Token: <existing CSRF token>
+X-Frame-Captured-At: <UTC timestamp>
+X-Frame-Video-Time-Sec: <non-negative finite value>
+
+<raw JPEG bytes>
 ```
 
-### 6.2 受信方式
-
-フロントエンドから、各フレームが単独でデコード可能な `image/jpeg` のエンコード済み映像フレームを1フレームずつ受信する。
-
-仕様:
-
-- 1 WebSocket text message = 1 個別にデコード可能なJPEGフレーム
-- 640×480 / 5fps相当
-- `sequenceNo` はセッション内で単調に増加し、再接続後も継続する
-- JPEGデコードは前後のフレームまたはWorkerのローカル状態に依存しない
-
-### 6.3 フレームメタデータ
-
-WebSocketメッセージは以下のJSONとする。
-
-```json
-{
-  "sessionId": "uuid",
-  "sequenceNo": 1,
-  "capturedAt": "2026-06-14T10:00:00.000Z",
-  "videoTimeSec": 123.45,
-  "codec": "image/jpeg",
-  "payloadBase64": "..."
-}
-```
-
-`payloadBase64` をBackendでJPEGバイナリへ復元してBlob本体として保存し、受信時刻として `receivedAt` を付与する。
-
-`capturedAt` はUTC時刻、`videoTimeSec` はフレーム送信時点の動画教材内の再生位置（秒）で、0以上の有限値を必須とする。Backendはフレーム番号またはFPSからこの値を算出・補完しない。
-
-メッセージ累積サイズは2MiB、Base64文字数は1,400,000文字、デコード後JPEGは1MiBを上限とする。Backendは `sessionId` 一致、`sequenceNo`、UTC時刻、`videoTimeSec`、`codec: image/jpeg`、およびJPEGを検証する。上限超過はWebSocket close status `1009 MessageTooBig`、その他の不正payloadは `1007 InvalidPayloadData` とする。廃止済みフレーム間参照フィールドを含むpayloadは受理しない。
-
-Blob保存とService Bus投入が成功した場合は、サーバーが次のACKを返す。
-
-```json
-{"type":"frame_ack","sequenceNo":1}
-```
-
-Blob保存後のqueue投入などが一時失敗した場合は、接続を維持したまま再送可能なNACKを返す。クライアントは同じsequenceのフレームを再送する。
-
-```json
-{"type":"frame_nack","sequenceNo":1,"retryable":true}
-```
+- routeの`sessionId`とCookie principalのSession一致、CSRF、正の`sequenceNo`、header metadata、`Content-Type`、JPEG validityを検証する。proxyとASP.NET Coreの双方で1 MiBのbody上限を設定し、chunked bodyも上限超過まで読まない。
+- Blob保存と`sessionId`をSession IDとしたService Bus enqueueの両方を完了してからだけ`202 Accepted`を返す。`(sessionId, sequenceNo)`の同一metadata・bytes再送は`202`、異なるものは`409 Conflict`とする。
+- validationは`400`、size超過は`413`、既存認証・CSRF失敗は`401`/`403`、依存障害は`503`、設定済みadmission controlは`429`（必要なら`Retry-After`）とする。`503`/`429`だけをretryableとし、clientは同じframeを再送する。
 
 ## 7. Blob Storage保存仕様
 
 ### 7.1 保存対象
 
-WebSocketで受信した、単独でデコード可能なJPEGバイナリをBlob Storageへ保存する。
+HTTP binary ingressで受信した、単独でデコード可能なJPEGバイナリをBlob Storageへ保存する。
 
 ### 7.2 パス形式
 

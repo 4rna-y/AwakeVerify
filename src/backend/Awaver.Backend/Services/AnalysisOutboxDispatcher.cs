@@ -73,6 +73,7 @@ public sealed class AnalysisOutboxDispatcher(
         if (!IsAcceptingClaims) return;
         var batchStopwatch = Stopwatch.StartNew();
         var batchOutcome = "success";
+        var claimedCount = 0;
         try
         {
             var leaseId = Guid.NewGuid();
@@ -87,6 +88,7 @@ public sealed class AnalysisOutboxDispatcher(
                 await using var claimScope = scopeFactory.CreateAsyncScope();
                 var dbContext = claimScope.ServiceProvider.GetRequiredService<AwaverDbContext>();
                 claimed = await ClaimDueEventsAsync(dbContext, options.BatchSize, leaseId, processingOwner, DateTimeOffset.UtcNow, options.LeaseDuration, cancellationToken);
+                claimedCount = claimed.Count;
             }
             catch
             {
@@ -96,7 +98,7 @@ public sealed class AnalysisOutboxDispatcher(
             finally
             {
                 claimGate.Release();
-                observability?.RecordClaim(claimStopwatch.Elapsed, claimOutcome, claimed.Count);
+                if (claimedCount > 0 || claimOutcome != "success") observability?.RecordClaim(claimStopwatch.Elapsed, claimOutcome, claimedCount);
             }
 
             foreach (var outboxEvent in claimed)
@@ -131,7 +133,7 @@ public sealed class AnalysisOutboxDispatcher(
         }
         finally
         {
-            observability?.RecordBatch(batchStopwatch.Elapsed, batchOutcome);
+            if (claimedCount > 0 || batchOutcome != "success") observability?.RecordBatch(batchStopwatch.Elapsed, batchOutcome);
         }
     }
 

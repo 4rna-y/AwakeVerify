@@ -13,12 +13,11 @@ test("uses safe local defaults and resolves the fixture", () => {
     assert.equal(config.durationSeconds, 10);
     assert.equal(config.framesPerSecond, 1);
     assert.equal(config.apiBaseUrl.toString(), "http://localhost:5194/");
-    assert.equal(config.maxInFlightFrames, 5);
     assert.equal(config.faultInjection.size, 0);
 });
 
 test("rejects invalid numeric settings", () => {
-    for (const [name, value] of [["CONCURRENT_SESSIONS", "0"], ["DURATION_SECONDS", "-1"], ["FRAMES_PER_SECOND", "NaN"], ["MAX_IN_FLIGHT_FRAMES", "1.5"]]) {
+    for (const [name, value] of [["CONCURRENT_SESSIONS", "0"], ["DURATION_SECONDS", "-1"], ["FRAMES_PER_SECOND", "NaN"]]) {
         assert.throws(() => loadConfig({ [name]: value }, frontendRoot), new RegExp(name));
     }
 });
@@ -32,10 +31,10 @@ test("requires an explicit Azure opt-in", () => {
     const config = loadConfig({
         API_BASE_URL: "https://load-test.azurewebsites.net",
         ALLOW_AZURE_LOAD_TEST: "true",
-        FAULT_INJECTION: "ws-reconnect,duplicate-frame",
+        FAULT_INJECTION: "signalr-reconnect,duplicate-frame",
     }, frontendRoot);
     assert.equal(isAzureHttpsEndpoint(config.apiBaseUrl), true);
-    assert.deepEqual([...config.faultInjection], ["ws-reconnect", "duplicate-frame"]);
+    assert.deepEqual([...config.faultInjection], ["signalr-reconnect", "duplicate-frame"]);
     assert.equal(isHighLoad(config), false);
 });
 
