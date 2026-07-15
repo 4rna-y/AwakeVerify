@@ -442,6 +442,7 @@ payloadは `13.1` / `13.2` と同じ `drowsiness_score` または `tracking_stat
 | `WORKER_API_KEY` | ローカルでのBackend `analysis_worker` 認証用秘密値 | 必須（local） |
 | `WORKER_AUTH_MODE` | WorkerのBackend認証方式。`api_key` または `entra_id` | localは`api_key`、productionは`entra_id` |
 | `WORKER_BACKEND_TOKEN_SCOPE` | 本番Managed Identityが取得するBackend API audience / scope | 必須（production） |
+| `REDIS_CLUSTER_MODE` | `true` の場合、Azure Managed Redis OSS Cluster 用の Redis Cluster client を使う。ローカル単一Redisでは `false` のままとする。 | `false` |
 | `WORKER_BACKEND_CLIENT_ID` | User-assigned Managed Identityを選択する場合のclient ID。未設定時はDefaultAzureCredentialの既定選択 | 任意（production） |
 | `REDIS_CONNECTION_STRING` | PERCLOS状態用Redis接続。`redis://` / `rediss://` / `unix://` URLを推奨する。ローカルdevcontainerのBackend共有設定である `redis:6379,password=<REDIS_PASSWORD>` もWorkerがURLへ正規化して受け付ける | 必須 |
 | `WORKER_STARTUP_CHECK_TIMEOUT_SECONDS` | 起動時疎通確認timeout | `3.0` |

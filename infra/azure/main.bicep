@@ -697,6 +697,10 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkload
               secretRef: 'redis-connection'
             }
             {
+              name: 'REDIS_CLUSTER_MODE'
+              value: 'true'
+            }
+            {
               name: 'WORKER_SESSION_CONCURRENCY'
               value: string(workerSessionConcurrency)
             }

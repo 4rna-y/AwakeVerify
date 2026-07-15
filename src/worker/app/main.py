@@ -106,7 +106,8 @@ class WorkerConfig:
     blob_connection_string: str | None
     blob_container_name: str
     redis_connection_string: str | None = None
-    worker_api_key: str | None = None
+    redis_cluster_mode: bool = False
+    worker_api_key: str | None = None,
     worker_auth_mode: str = "api_key"
     worker_backend_token_scope: str | None = None
     worker_backend_client_id: str | None = None
@@ -994,7 +995,20 @@ def create_processed_frame_store(config: WorkerConfig) -> RedisProcessedFrameSto
 
 def create_redis_client(config: WorkerConfig) -> Any:
     redis_module = cast(Any, __import__("redis"))
-    return redis_module.Redis.from_url(normalize_redis_connection_string(cast(str, config.redis_connection_string)), decode_responses=False)
+    client_type = redis_module.RedisCluster if config.redis_cluster_mode else redis_module.Redis
+    return client_type.from_url(normalize_redis_connection_string(cast(str, config.redis_connection_string)), decode_responses=False)
+
+
+def _boolean_env(name: str, *, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value == "":
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(f"{name} must be true or false")
 
 
 def normalize_redis_connection_string(value: str) -> str:
@@ -1070,6 +1084,7 @@ def load_config(args: argparse.Namespace) -> WorkerConfig:
         blob_connection_string=first_non_empty_env("AZURE_BLOB_STORAGE_CONNECTION_STRING", "Azure__BlobStorage__ConnectionString", "BLOB_CONNECTION_STRING"),
         blob_container_name=first_non_empty_env("AZURE_BLOB_STORAGE_CONTAINER_NAME", "Azure__BlobStorage__ContainerName", "BLOB_CONTAINER_NAME") or "frames",
         redis_connection_string=first_non_empty_env("REDIS_CONNECTION_STRING"),
+        redis_cluster_mode=_boolean_env("REDIS_CLUSTER_MODE", default=False),
         worker_api_key=first_non_empty_env("WORKER_API_KEY"),
         worker_auth_mode=first_non_empty_env("WORKER_AUTH_MODE") or (
             "entra_id" if (os.getenv("WORKER_ENVIRONMENT") or os.getenv("ASPNETCORE_ENVIRONMENT", "")).lower() == "production" else "api_key"

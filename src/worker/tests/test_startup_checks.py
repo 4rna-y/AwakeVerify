@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 from app.main import (
     WorkerConfig,
     check_backend_dependency,
+    create_redis_client,
     check_service_bus_dependency,
     is_azure_frame_source_enabled,
     normalize_redis_connection_string,
@@ -160,6 +161,34 @@ class StartupChecksTests(TestCase):
         self.assertTrue(result.reachable)
         self.assertEqual(result.detail, "queue receiver idle=frame-processing-queue")
         client.get_queue_sender.assert_not_called()
+
+    def test_redis_cluster_mode_uses_the_cluster_client(self) -> None:
+        cluster_client = SimpleNamespace(from_url=MagicMock(return_value="cluster-client"))
+        standalone_client = SimpleNamespace(from_url=MagicMock())
+        redis_module = SimpleNamespace(Redis=standalone_client, RedisCluster=cluster_client)
+        config = WorkerConfig(
+            model_path=Path("model.task"),
+            backend_base_url=self.base_url,
+            backend_health_url=None,
+            poll_interval_seconds=0.2,
+            post_timeout_seconds=3.0,
+            startup_check_timeout_seconds=3.0,
+            health_host="0.0.0.0",
+            health_port=8000,
+            service_bus_connection_string="Endpoint=sb://example/;SharedAccessKeyName=name;SharedAccessKey=key",
+            service_bus_queue_name="frame-processing-queue",
+            blob_connection_string="UseDevelopmentStorage=true",
+            blob_container_name="frames",
+            redis_connection_string="rediss://:password@cache.example:10000/0",
+            redis_cluster_mode=True,
+        )
+
+        with patch("builtins.__import__", return_value=redis_module):
+            client = create_redis_client(config)
+
+        self.assertEqual(client, "cluster-client")
+        cluster_client.from_url.assert_called_once_with("rediss://:password@cache.example:10000/0", decode_responses=False)
+        standalone_client.from_url.assert_not_called()
 
     def test_legacy_devcontainer_redis_connection_string_is_normalized_to_a_url(self) -> None:
         result = normalize_redis_connection_string("redis:6379,password=R8spudTivuoA5XUSqBDxvA==")
