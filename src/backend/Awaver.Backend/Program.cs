@@ -9,8 +9,6 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using OpenTelemetry.Metrics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
-using Microsoft.AspNetCore.HttpOverrides;
-using System.Net;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -150,9 +148,10 @@ if (!app.Environment.IsEnvironment("Testing"))
 }
 
 if (app.Environment.IsDevelopment()) app.MapOpenApi();
-var forwardedHeaders = BuildForwardedHeadersOptions(builder.Configuration, app.Environment);
-app.UseForwardedHeaders(forwardedHeaders);
-app.UseHttpsRedirection();
+// ACA terminates public TLS and performs HTTP-to-HTTPS redirects at its ingress.
+// The container target port is never publicly exposed, so production must not
+// consume client-controlled X-Forwarded-* values merely to redirect requests.
+if (!app.Environment.IsProduction()) app.UseHttpsRedirection();
 app.UseCors("Frontend");
 app.UseAuthentication();
 app.UseMiddleware<CsrfProtectionMiddleware>();
@@ -195,27 +194,4 @@ static async Task SeedAdminAsync(AwaverDbContext dbContext, string adminId, stri
     await dbContext.SaveChangesAsync();
 }
 static string RequireConfigurationValue(string? value, string settingName) => !string.IsNullOrWhiteSpace(value) ? value : throw new InvalidOperationException($"Required configuration is missing: {settingName}. Local execution must use the production-equivalent dependency services.");
-static ForwardedHeadersOptions BuildForwardedHeadersOptions(IConfiguration configuration, IHostEnvironment environment)
-{
-    var options = new ForwardedHeadersOptions { ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto, ForwardLimit = 1 };
-    var proxyAddresses = configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? [];
-    var networkRanges = configuration.GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>() ?? [];
-    foreach (var proxyAddress in proxyAddresses)
-    {
-        if (!IPAddress.TryParse(proxyAddress, out var address)) throw new InvalidOperationException("ForwardedHeaders:KnownProxies contains an invalid IP address.");
-        options.KnownProxies.Add(address);
-    }
-    foreach (var networkRange in networkRanges)
-    {
-        var parts = networkRange.Split('/', 2);
-        if (parts.Length != 2 || !IPAddress.TryParse(parts[0], out var prefix) || !int.TryParse(parts[1], out var prefixLength)) throw new InvalidOperationException("ForwardedHeaders:KnownNetworks contains an invalid CIDR range.");
-        options.KnownIPNetworks.Add(new System.Net.IPNetwork(prefix, prefixLength));
-    }
-    if (environment.IsProduction() && proxyAddresses.Length == 0 && networkRanges.Length == 0)
-    {
-        throw new InvalidOperationException("ForwardedHeaders:KnownProxies or ForwardedHeaders:KnownNetworks must be configured in production.");
-    }
-    return options;
-}
-
 public partial class Program;

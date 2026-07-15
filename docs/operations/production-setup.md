@@ -63,8 +63,7 @@ flowchart LR
 - 別originにする場合、Backendの `Cors:AllowedOrigins` に**正確なFrontend originだけ**を設定する。ワイルドカードを使わない。
 - CORSでは資格情報付き通信を利用するため、許可originは明示的に固定する。
 - Worker、PostgreSQL、Redis、Blob、Service Busはインターネットへ公開しない。Private Endpoint、VNet統合、ファイアウォール規則などで到達元を制限する。
-- 本番の公開URL、HTTPS終端、リバースプロキシのforwarded headersは、Backend ACA ingress に合わせて検証する。ACA の TLS 終端後も `/health/live`、`/health/ready`、HTTP frame API、SignalR negotiate が redirect loop にならないことを確認する。
-- Backend ACA には、network owner が確認した ingress proxy CIDR を `ForwardedHeaders__KnownNetworks__0` として渡す。`0.0.0.0/0`、client network、推測した public CIDR は使用しない。production Backend は trusted proxy/network 設定がない場合に起動を拒否するため、任意 client の `X-Forwarded-*` を信頼しない。
+- 本番の公開URLとHTTPS終端はBackend ACA ingressに合わせて検証する。ACA がTLS終端とHTTP-to-HTTPS redirectを担い、container target portは外部公開しない。Backendはproductionでclient提供の`X-Forwarded-*`を処理しないため、`/health/live`、`/health/ready`、HTTP frame API、SignalR negotiateがredirect loopにならないことを確認する。
 
 ## 4. Azureリソースの準備
 

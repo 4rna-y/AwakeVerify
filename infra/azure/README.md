@@ -57,12 +57,11 @@ workerEntraAuthority
 workerEntraAudience
 workerEntraValidIssuer
 workerBackendTokenScope
-backendForwardedHeadersKnownNetwork
 ```
 
 `frontendOrigin` は省略できる。省略時は通常 parameter file の `https://placeholder.invalid` が使われるため、Devcontainer CLI による非ブラウザ負荷試験は可能である。ブラウザ E2E を実施する前にだけ、実際のFrontend HTTPS originで上書きする。
 
-`backendForwardedHeadersKnownNetwork` は秘密値ではないが、環境固有の trusted proxy boundary であるため同じ ignored parameter file に置く。Backend ACA production startup はこの値を `ForwardedHeaders__KnownNetworks__0` として必須にする。ACA ingress proxy の実際の CIDR を対象環境の network owner から確認して指定し、`0.0.0.0/0`、client network、推測した public CIDR を設定してはならない。未設定または不正な CIDR では Backend が起動に失敗するため、任意 client の `X-Forwarded-*` header は信頼されない。
+Backend ACA は public TLS と HTTP-to-HTTPS redirect を ACA ingress に委譲する。container target port は外部公開せず、Backend はproductionで `X-Forwarded-For` / `X-Forwarded-Proto` を処理しないため、ACA ingress proxy CIDRのparameterは不要である。
 
 IaC拡張前の secure parameter file は、旧 `backendImage`、`databaseConnectionString`、`redisConnectionString`、Blob接続文字列、registry credential 等を持つため互換性がない。既存ファイルをバックアップした上で、必ず最新の `nonprod.secrets.parameters.json.example` から新規作成する。
 

@@ -142,9 +142,6 @@ param managedRedisSkuName string = 'Balanced_B0'
 @description('Frontend origin permitted by Backend CORS, including scheme and no trailing slash.')
 param frontendOrigin string
 
-@description('CIDR of the trusted ACA ingress proxy network that is allowed to supply X-Forwarded-For and X-Forwarded-Proto to Backend. Do not use 0.0.0.0/0.')
-param backendForwardedHeadersKnownNetwork string
-
 @description('Microsoft Entra authority for Backend Worker bearer-token validation.')
 param workerEntraAuthority string
 
@@ -623,10 +620,6 @@ resource backendContainerApp 'Microsoft.App/containerApps@2024-03-01' = if (depl
             {
               name: 'Cors__AllowedOrigins__0'
               value: frontendOrigin
-            }
-            {
-              name: 'ForwardedHeaders__KnownNetworks__0'
-              value: backendForwardedHeadersKnownNetwork
             }
           ]
           probes: [
