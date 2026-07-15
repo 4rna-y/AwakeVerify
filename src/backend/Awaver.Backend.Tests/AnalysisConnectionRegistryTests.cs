@@ -9,6 +9,19 @@ namespace Awaver.Backend.Tests;
 public sealed class AnalysisConnectionRegistryTests
 {
     [Fact]
+    public void RedisRegistryKeys_ShareOneClusterHashTag()
+    {
+        var connectionKey = RedisAnalysisConnectionRegistry.ConnectionKey("connection");
+        var connectionSessionsKey = RedisAnalysisConnectionRegistry.ConnectionSessionsKey("connection");
+        var sessionConnectionsKey = RedisAnalysisConnectionRegistry.SessionConnectionsKey(Guid.NewGuid());
+        var authConnectionsKey = RedisAnalysisConnectionRegistry.AuthConnectionsKey(Guid.NewGuid());
+
+        Assert.All(
+            new[] { connectionKey, connectionSessionsKey, sessionConnectionsKey, authConnectionsKey },
+            key => Assert.Contains(RedisAnalysisConnectionRegistry.ClusterHashTag, key, StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task RegistrationFromOneBackendScope_IsVisibleToAnotherScope()
     {
         IAnalysisConnectionRegistry sharedRegistry = new InMemoryAnalysisConnectionRegistry();

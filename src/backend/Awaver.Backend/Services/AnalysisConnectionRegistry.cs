@@ -103,14 +103,15 @@ public sealed class InMemoryAnalysisConnectionRegistry(TimeProvider? timeProvide
 }
 
 /// <summary>
-/// Redis schema (all keys use the signalr:connection-registry namespace):
+/// Redis schema (all keys use the signalr:connection-registry namespace and a shared cluster hash tag):
 /// connection:{connectionId} (hash), connection:{connectionId}:sessions (set),
 /// session:{observedSessionId}:connections (set), and auth:{authSessionId}:connections (set).
-/// Lua scripts keep their cross-key updates atomic.
+/// The common hash tag keeps every Lua script key in one Redis Cluster slot while preserving atomic updates.
 /// </summary>
 public sealed class RedisAnalysisConnectionRegistry(IConnectionMultiplexer multiplexer, TimeSpan? ttl = null) : IAnalysisConnectionRegistry
 {
     private const string Namespace = "signalr:connection-registry";
+    internal const string ClusterHashTag = "{signalr-registry}";
     private static readonly TimeSpan DefaultTtl = TimeSpan.FromHours(8);
     private readonly IDatabase database = multiplexer.GetDatabase();
     private readonly TimeSpan registrationTtl = ttl ?? DefaultTtl;
@@ -247,11 +248,11 @@ public sealed class RedisAnalysisConnectionRegistry(IConnectionMultiplexer multi
         _ = await GetConnectionsForSessionAsync(observedSessionId, cancellationToken).ConfigureAwait(false);
     }
 
-    private static string ConnectionKey(string connectionId) => $"{ConnectionKeyPrefix}{connectionId}";
-    private static string ConnectionSessionsKey(string connectionId) => $"{ConnectionKey(connectionId)}:sessions";
-    private static string SessionConnectionsKey(Guid observedSessionId) => $"{SessionKeyPrefix}{observedSessionId:D}:connections";
-    private static string AuthConnectionsKey(Guid authSessionId) => $"{AuthKeyPrefix}{authSessionId:D}:connections";
-    private static string ConnectionKeyPrefix => $"{Namespace}:connection:";
-    private static string SessionKeyPrefix => $"{Namespace}:session:";
-    private static string AuthKeyPrefix => $"{Namespace}:auth:";
+    internal static string ConnectionKey(string connectionId) => $"{ConnectionKeyPrefix}{connectionId}";
+    internal static string ConnectionSessionsKey(string connectionId) => $"{ConnectionKey(connectionId)}:sessions";
+    internal static string SessionConnectionsKey(Guid observedSessionId) => $"{SessionKeyPrefix}{observedSessionId:D}:connections";
+    internal static string AuthConnectionsKey(Guid authSessionId) => $"{AuthKeyPrefix}{authSessionId:D}:connections";
+    private static string ConnectionKeyPrefix => $"{Namespace}:{ClusterHashTag}:connection:";
+    private static string SessionKeyPrefix => $"{Namespace}:{ClusterHashTag}:session:";
+    private static string AuthKeyPrefix => $"{Namespace}:{ClusterHashTag}:auth:";
 }

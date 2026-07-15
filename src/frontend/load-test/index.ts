@@ -87,30 +87,33 @@ class VirtualSession {
     }
 
     public async run(startDelayMs: number): Promise<void> {
-        await delay(startDelayMs);
-        await this.startSession();
-        await this.connectResultStream();
-        await this.connectFrameSocket(false);
+        try {
+            await delay(startDelayMs);
+            await this.startSession();
+            await this.connectResultStream();
+            await this.connectFrameSocket(false);
 
-        const startedAt = Date.now();
-        const endsAt = startedAt + this.config.durationSeconds * 1000;
-        let injected = false;
-        while (Date.now() < endsAt) {
-            if (!injected && Date.now() - startedAt >= (endsAt - startedAt) / 2) {
-                injected = true;
-                await this.injectConfiguredFaults();
+            const startedAt = Date.now();
+            const endsAt = startedAt + this.config.durationSeconds * 1000;
+            let injected = false;
+            while (Date.now() < endsAt) {
+                if (!injected && Date.now() - startedAt >= (endsAt - startedAt) / 2) {
+                    injected = true;
+                    await this.injectConfiguredFaults();
+                }
+                await this.sendNextFrame();
+                await delay(Math.max(1, Math.round(1000 / this.config.framesPerSecond)));
             }
-            await this.sendNextFrame();
-            await delay(Math.max(1, Math.round(1000 / this.config.framesPerSecond)));
-        }
 
-        await delay(this.config.resultTimeoutSeconds * 1000);
-        for (const sequenceNo of this.pendingFrames.keys()) {
-            this.metrics.increment("timeouts");
-            this.sentAtBySequence.delete(sequenceNo);
+            await delay(this.config.resultTimeoutSeconds * 1000);
+            for (const sequenceNo of this.pendingFrames.keys()) {
+                this.metrics.increment("timeouts");
+                this.sentAtBySequence.delete(sequenceNo);
+            }
+            this.pendingFrames.clear();
+        } finally {
+            await this.close();
         }
-        this.pendingFrames.clear();
-        await this.close();
     }
 
     private async startSession(): Promise<void> {
