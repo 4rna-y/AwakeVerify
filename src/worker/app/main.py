@@ -995,8 +995,13 @@ def create_processed_frame_store(config: WorkerConfig) -> RedisProcessedFrameSto
 
 def create_redis_client(config: WorkerConfig) -> Any:
     redis_module = cast(Any, __import__("redis"))
-    client_type = redis_module.RedisCluster if config.redis_cluster_mode else redis_module.Redis
-    return client_type.from_url(normalize_redis_connection_string(cast(str, config.redis_connection_string)), decode_responses=False)
+    connection_url = normalize_redis_connection_string(cast(str, config.redis_connection_string))
+    if config.redis_cluster_mode:
+        # Azure Managed Redis OSS Cluster advertises node IPs during discovery while
+        # presenting a certificate for the configured DNS endpoint. Keep TLS enabled
+        # but avoid rejecting those discovered IPs solely on hostname mismatch.
+        return redis_module.RedisCluster.from_url(connection_url, decode_responses=False, ssl_check_hostname=False)
+    return redis_module.Redis.from_url(connection_url, decode_responses=False)
 
 
 def _boolean_env(name: str, *, default: bool) -> bool:

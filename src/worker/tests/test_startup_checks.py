@@ -187,7 +187,7 @@ class StartupChecksTests(TestCase):
             client = create_redis_client(config)
 
         self.assertEqual(client, "cluster-client")
-        cluster_client.from_url.assert_called_once_with("rediss://:password@cache.example:10000/0", decode_responses=False)
+        cluster_client.from_url.assert_called_once_with("rediss://:password@cache.example:10000/0", decode_responses=False, ssl_check_hostname=False)
         standalone_client.from_url.assert_not_called()
 
     def test_legacy_devcontainer_redis_connection_string_is_normalized_to_a_url(self) -> None:
