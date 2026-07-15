@@ -21,7 +21,8 @@ public sealed class AnalysisOutboxDispatcher(
     AnalysisResultBroadcaster broadcaster,
     IAnalysisConnectionRegistry connections,
     OutboxDispatchOptions options,
-    ILogger<AnalysisOutboxDispatcher> logger) : BackgroundService
+    ILogger<AnalysisOutboxDispatcher> logger,
+    IAnalysisOutboxObservability? observability = null) : BackgroundService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly string processingOwner = $"{Environment.MachineName}:{Guid.NewGuid():N}";
@@ -50,7 +51,7 @@ public sealed class AnalysisOutboxDispatcher(
             }
             catch (Exception exception)
             {
-                logger.LogError(exception, "Failed to dispatch analysis outbox events.");
+                logger.LogError("Failed to dispatch analysis outbox events. Error type: {ErrorType}.", exception.GetType().Name);
             }
         }
     }
@@ -70,55 +71,67 @@ public sealed class AnalysisOutboxDispatcher(
     internal async Task DispatchDueEventsAsync(CancellationToken cancellationToken)
     {
         if (!IsAcceptingClaims) return;
-        var stopwatch = Stopwatch.StartNew();
-        var leaseId = Guid.NewGuid();
-        IReadOnlyList<AnalysisEventOutbox> claimed;
-
-        await claimGate.WaitAsync(cancellationToken);
+        var batchStopwatch = Stopwatch.StartNew();
+        var batchOutcome = "success";
         try
         {
-            if (!IsAcceptingClaims) return;
-            await using var claimScope = scopeFactory.CreateAsyncScope();
-            var dbContext = claimScope.ServiceProvider.GetRequiredService<AwaverDbContext>();
-            claimed = await ClaimDueEventsAsync(dbContext, options.BatchSize, leaseId, processingOwner, DateTimeOffset.UtcNow, options.LeaseDuration, cancellationToken);
+            var leaseId = Guid.NewGuid();
+            IReadOnlyList<AnalysisEventOutbox> claimed = [];
+            var claimStopwatch = Stopwatch.StartNew();
+            var claimOutcome = "success";
+
+            await claimGate.WaitAsync(cancellationToken);
+            try
+            {
+                if (!IsAcceptingClaims) return;
+                await using var claimScope = scopeFactory.CreateAsyncScope();
+                var dbContext = claimScope.ServiceProvider.GetRequiredService<AwaverDbContext>();
+                claimed = await ClaimDueEventsAsync(dbContext, options.BatchSize, leaseId, processingOwner, DateTimeOffset.UtcNow, options.LeaseDuration, cancellationToken);
+            }
+            catch
+            {
+                claimOutcome = "error";
+                throw;
+            }
+            finally
+            {
+                claimGate.Release();
+                observability?.RecordClaim(claimStopwatch.Elapsed, claimOutcome, claimed.Count);
+            }
+
+            foreach (var outboxEvent in claimed)
+            {
+                var deliveryStopwatch = Stopwatch.StartNew();
+                var deliveryOutcome = "delivered";
+                try
+                {
+                    // No claim transaction remains open while the registry, SignalR,
+                    // or SSE broadcaster performs network or subscriber work.
+                    await DeliverAsync(outboxEvent, cancellationToken);
+                    if (!await MarkDeliveredAsync(outboxEvent.EventId, leaseId, cancellationToken)) deliveryOutcome = "lease_lost";
+                }
+                catch (Exception exception)
+                {
+                    deliveryOutcome = "failed";
+                    await MarkFailedAsync(outboxEvent.EventId, leaseId, exception, cancellationToken);
+                }
+                finally
+                {
+                    observability?.RecordDelivery(deliveryStopwatch.Elapsed, deliveryOutcome);
+                }
+            }
+
+            var health = await ReadHealthAsync(cancellationToken);
+            observability?.SetUndeliveredHealth(health.UndeliveredCount, health.OldestAge);
+        }
+        catch
+        {
+            batchOutcome = "error";
+            throw;
         }
         finally
         {
-            claimGate.Release();
-        }
-
-        var delivered = 0;
-        var failed = 0;
-        var retries = 0;
-        foreach (var outboxEvent in claimed)
-        {
-            try
-            {
-                // No claim transaction remains open while the registry, SignalR,
-                // or SSE broadcaster performs network or subscriber work.
-                await DeliverAsync(outboxEvent, cancellationToken);
-                if (await MarkDeliveredAsync(outboxEvent.EventId, leaseId, cancellationToken))
-                {
-                    delivered++;
-                }
-                else
-                {
-                    logger.LogInformation("Outbox event {EventId} lease was lost before delivery completion.", outboxEvent.EventId);
-                }
-            }
-            catch (Exception exception)
-            {
-                failed++;
-                if (await MarkFailedAsync(outboxEvent.EventId, leaseId, exception, cancellationToken)) retries++;
-            }
-        }
-
-        var health = await ReadHealthAsync(cancellationToken);
-        if (claimed.Count > 0 || failed > 0)
-        {
-            logger.LogInformation(
-                "Outbox batch completed: claimed {ClaimedCount}, delivered {DeliveredCount}, failed {FailedCount}, retries {RetryCount}, undelivered {UndeliveredCount}, oldest undelivered age ms {OldestUndeliveredAgeMs}, duration ms {DurationMs}.",
-                claimed.Count, delivered, failed, retries, health.UndeliveredCount, health.OldestAge?.TotalMilliseconds, stopwatch.Elapsed.TotalMilliseconds);
+            observability?.RecordBatch(batchStopwatch.Elapsed, batchOutcome);
         }
     }
 
@@ -176,61 +189,78 @@ public sealed class AnalysisOutboxDispatcher(
 
     private async Task<bool> MarkDeliveredAsync(Guid eventId, Guid leaseId, CancellationToken cancellationToken)
     {
-        await using var scope = scopeFactory.CreateAsyncScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<AwaverDbContext>();
-        var changed = await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
-            UPDATE analysis_event_outbox
-            SET delivered_at = {DateTimeOffset.UtcNow},
-                lease_id = NULL,
-                locked_until = NULL,
-                processing_owner = NULL,
-                last_error = NULL
-            WHERE event_id = {eventId}
-              AND delivered_at IS NULL
-              AND lease_id = {leaseId}
-            """, cancellationToken);
-        return changed == 1;
+        var stopwatch = Stopwatch.StartNew();
+        var outcome = "error";
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<AwaverDbContext>();
+            var changed = await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE analysis_event_outbox
+                SET delivered_at = {DateTimeOffset.UtcNow},
+                    lease_id = NULL,
+                    locked_until = NULL,
+                    processing_owner = NULL,
+                    last_error = NULL
+                WHERE event_id = {eventId}
+                  AND delivered_at IS NULL
+                  AND lease_id = {leaseId}
+                """, cancellationToken);
+            outcome = changed == 1 ? "recorded" : "lease_lost";
+            return changed == 1;
+        }
+        finally
+        {
+            observability?.RecordMark(stopwatch.Elapsed, "delivered", outcome);
+        }
     }
 
     private async Task<bool> MarkFailedAsync(Guid eventId, Guid leaseId, Exception exception, CancellationToken cancellationToken)
     {
-        await using var scope = scopeFactory.CreateAsyncScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<AwaverDbContext>();
-        var error = exception is RedisException
-            ? "SignalR connection registry is unavailable."
-            : exception.Message[..Math.Min(exception.Message.Length, 1024)];
-        var currentAttempt = await dbContext.AnalysisEventOutbox
-            .Where(item => item.EventId == eventId && item.DeliveredAt == null && item.LeaseId == leaseId)
-            .Select(item => (int?)item.AttemptCount)
-            .SingleOrDefaultAsync(cancellationToken);
-        if (currentAttempt is null) return false;
-
-        var nextAttemptCount = currentAttempt.Value + 1;
-        var delaySeconds = Math.Min(300, 1 << Math.Min(8, nextAttemptCount));
-        var changed = await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
-            UPDATE analysis_event_outbox
-            SET attempt_count = {nextAttemptCount},
-                next_attempt_at = {DateTimeOffset.UtcNow.AddSeconds(delaySeconds)},
-                last_error = {error},
-                lease_id = NULL,
-                locked_until = NULL,
-                processing_owner = NULL
-            WHERE event_id = {eventId}
-              AND delivered_at IS NULL
-              AND lease_id = {leaseId}
-            """, cancellationToken);
-        if (changed == 1)
+        var stopwatch = Stopwatch.StartNew();
+        var outcome = "error";
+        try
         {
-            if (exception is RedisException)
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<AwaverDbContext>();
+            var error = exception is RedisException
+                ? "SignalR connection registry is unavailable."
+                : exception.Message[..Math.Min(exception.Message.Length, 1024)];
+            var currentAttempt = await dbContext.AnalysisEventOutbox
+                .Where(item => item.EventId == eventId && item.DeliveredAt == null && item.LeaseId == leaseId)
+                .Select(item => (int?)item.AttemptCount)
+                .SingleOrDefaultAsync(cancellationToken);
+            if (currentAttempt is null)
             {
-                logger.LogWarning("Analysis outbox event {EventId} deferred because the SignalR connection registry is unavailable (attempt {AttemptCount}).", eventId, nextAttemptCount);
+                outcome = "lease_lost";
+                return false;
             }
-            else
+
+            var nextAttemptCount = currentAttempt.Value + 1;
+            var delaySeconds = Math.Min(300, 1 << Math.Min(8, nextAttemptCount));
+            var changed = await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE analysis_event_outbox
+                SET attempt_count = {nextAttemptCount},
+                    next_attempt_at = {DateTimeOffset.UtcNow.AddSeconds(delaySeconds)},
+                    last_error = {error},
+                    lease_id = NULL,
+                    locked_until = NULL,
+                    processing_owner = NULL
+                WHERE event_id = {eventId}
+                  AND delivered_at IS NULL
+                  AND lease_id = {leaseId}
+                """, cancellationToken);
+            outcome = changed == 1 ? "recorded" : "lease_lost";
+            if (changed == 1)
             {
-                logger.LogWarning(exception, "Analysis outbox event {EventId} delivery failed (attempt {AttemptCount}).", eventId, nextAttemptCount);
+                logger.LogWarning("Analysis outbox delivery failed; the event will be retried. Error type: {ErrorType}.", exception.GetType().Name);
             }
+            return changed == 1;
         }
-        return changed == 1;
+        finally
+        {
+            observability?.RecordMark(stopwatch.Elapsed, "failed", outcome);
+        }
     }
 
     private async Task<(int UndeliveredCount, TimeSpan? OldestAge)> ReadHealthAsync(CancellationToken cancellationToken)

@@ -11,7 +11,7 @@
     "workerImageRepository": { "value": "awaver-worker" },
     "imageTag": { "value": "test" },
     "backendPlanSkuName": { "value": "S1" },
-    "backendMinInstances": { "value": 1 },
+    "backendMinInstances": { "value": 2 },
     "backendMaxInstances": { "value": 2 },
     "backendCpuScaleOutThreshold": { "value": 70 },
     "workerMinReplicas": { "value": 0 },

@@ -24,13 +24,15 @@ param workerImageRepository string = 'awaver-worker'
 @description('Image tag deployed to Backend and Worker after publication to the public OCI registry.')
 param imageTag string = 'test'
 
-@description('App Service Plan SKU for the Backend. It must support WebSockets and the requested instance count.')
+@description('App Service Plan SKU for the Backend. It must support WebSockets and the requested instance count. The non-production parameter file uses S1.')
 param backendPlanSkuName string = 'P1v3'
 
 @minValue(1)
+@description('Minimum Backend App Service Plan instances. The non-production parameter file keeps two instances warm for burst tests.')
 param backendMinInstances int = 1
 
 @minValue(1)
+@description('Maximum Backend App Service Plan instances. The non-production parameter file sets this to two, so CPU autoscale cannot delay the initial burst capacity.')
 param backendMaxInstances int = 2
 
 @minValue(1)
@@ -173,6 +175,7 @@ var backendAppName = '${namePrefix}-backend'
 var containerEnvironmentName = '${namePrefix}-cae'
 var workerAppName = '${namePrefix}-worker'
 var logAnalyticsName = '${namePrefix}-logs'
+var backendApplicationInsightsName = '${namePrefix}-backend-ai'
 var backendExpectedInstanceCount = backendMaxInstances
 var backendImage = '${containerImageRegistry}/${containerImageNamespace}/${backendImageRepository}:${imageTag}'
 var workerImage = '${containerImageRegistry}/${containerImageNamespace}/${workerImageRepository}:${imageTag}'
@@ -208,6 +211,17 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
     features: {
       enableLogAccessUsingOnlyResourcePermissions: true
     }
+  }
+}
+
+resource backendApplicationInsights 'Microsoft.Insights/components@2020-02-02' = {
+  name: backendApplicationInsightsName
+  location: location
+  kind: 'web'
+  tags: tags
+  properties: {
+    Application_Type: 'web'
+    WorkspaceResourceId: logAnalytics.id
   }
 }
 
@@ -498,6 +512,10 @@ resource backendApp 'Microsoft.Web/sites@2023-12-01' = if (deployWorkloads) {
         {
           name: 'ASPNETCORE_ENVIRONMENT'
           value: 'Production'
+        }
+        {
+          name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+          value: backendApplicationInsights.properties.ConnectionString
         }
         {
           name: 'BACKEND_EXPECTED_INSTANCE_COUNT'

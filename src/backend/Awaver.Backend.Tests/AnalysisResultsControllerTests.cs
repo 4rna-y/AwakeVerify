@@ -86,6 +86,29 @@ public sealed class AnalysisResultsControllerTests
     }
 
     [Fact]
+    public async Task Observability_RecordsOnlySafeOutcomesForSuccessIdempotentConflictAndValidation()
+    {
+        await using var db = CreateDb();
+        var session = await SeedSessionAsync(db);
+        db.Calibrations.Add(new Calibration { SessionId = session.SessionId, SourceSequenceNo = 1, EarOpen = .30m, EarThreshold = .225m, CalibratedAt = DateTimeOffset.Parse("2026-06-14T10:00:00Z") });
+        await db.SaveChangesAsync();
+        var observer = new RecordingAnalysisResultObservability();
+        var controller = new AnalysisResultsController(db, new AnalysisResultBroadcaster(), observability: observer);
+
+        Assert.IsType<AcceptedResult>(await controller.PublishAnalysisResult(session.SessionId, Payload(session.SessionId, 10), CancellationToken.None));
+        Assert.IsType<AcceptedResult>(await controller.PublishAnalysisResult(session.SessionId, Payload(session.SessionId, 10), CancellationToken.None));
+        Assert.IsType<ConflictObjectResult>(await controller.PublishAnalysisResult(session.SessionId, Payload(session.SessionId, 10, .9m), CancellationToken.None));
+        var invalid = JsonSerializer.Deserialize<JsonElement>(Payload(session.SessionId, 11).GetRawText().Replace(",\"videoTimeSec\":123.45", string.Empty));
+        Assert.IsType<BadRequestObjectResult>(await controller.PublishAnalysisResult(session.SessionId, invalid, CancellationToken.None));
+
+        Assert.Equal(["accepted", "idempotent", "conflict", "bad_request"], observer.Outcomes);
+        Assert.Contains("session_existence", observer.Stages);
+        Assert.Contains("type_specific_persistence_validation", observer.Stages);
+        Assert.Contains("outbox_idempotency_lookup", observer.Stages);
+        Assert.Contains("save_changes", observer.Stages);
+    }
+
+    [Fact]
     public async Task SuccessfulCalibration_IsPersistedWithOutboxAndRetryIsIdempotent()
     {
         await using var db = CreateDb();
@@ -170,6 +193,15 @@ public sealed class AnalysisResultsControllerTests
         var conflict = JsonSerializer.Deserialize<JsonElement>(payload.GetRawText().Replace("10:00:00", "10:00:01"));
         Assert.IsType<ConflictObjectResult>(await controller.PublishAnalysisResult(session.SessionId, conflict, CancellationToken.None));
         Assert.Single(db.AnalysisEventOutbox);
+    }
+
+    private sealed class RecordingAnalysisResultObservability : IAnalysisResultObservability
+    {
+        public List<string> Outcomes { get; } = [];
+        public List<string> Stages { get; } = [];
+
+        public void RecordRequest(string outcome, TimeSpan duration) => Outcomes.Add(outcome);
+        public void RecordStage(string stage, TimeSpan duration) => Stages.Add(stage);
     }
 
     private static JsonElement Payload(Guid sessionId, long sequence, decimal score = .8m, double videoTimeSec = 123.45) => JsonSerializer.Deserialize<JsonElement>($"{{\"type\":\"drowsiness_score\",\"sessionId\":\"{sessionId}\",\"sourceSequenceNo\":{sequence},\"scoredAt\":\"2026-06-14T10:00:10Z\",\"score\":{score},\"level\":\"danger\",\"perclos\":0.6,\"ear\":0.18,\"pitchDeg\":12.4,\"yawDeg\":4.2,\"videoTimeSec\":{videoTimeSec},\"shouldPause\":true}}");

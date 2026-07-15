@@ -4,8 +4,10 @@ using Awaver.Backend.Models;
 using Awaver.Backend.Services;
 using Awaver.Backend.WebSockets;
 using Azure.Messaging.ServiceBus;
+using Azure.Monitor.OpenTelemetry.Exporter;
 using Azure.Storage.Blobs;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using OpenTelemetry.Metrics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using StackExchange.Redis;
@@ -20,6 +22,15 @@ if (IsEntraWorkerAuthMode(workerAuthMode) || builder.Environment.IsProduction())
 
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
+var applicationInsightsConnectionString = Environment.GetEnvironmentVariable("APPLICATIONINSIGHTS_CONNECTION_STRING");
+if (!string.IsNullOrWhiteSpace(applicationInsightsConnectionString))
+{
+    builder.Services.AddOpenTelemetry()
+        .WithMetrics(metrics => metrics
+            .AddMeter(BackendObservability.MeterName)
+            .AddRuntimeInstrumentation()
+            .AddAzureMonitorMetricExporter(options => options.ConnectionString = applicationInsightsConnectionString));
+}
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
     ?? ["http://localhost:3000", "http://127.0.0.1:3000"];
 builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
@@ -28,6 +39,9 @@ builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
 var postgresConnectionString = RequireConfigurationValue(FirstNonWhiteSpace(builder.Configuration.GetConnectionString("DefaultConnection"), builder.Configuration["Postgres:ConnectionString"], Environment.GetEnvironmentVariable("DATABASE_CONNECTION_STRING"), BuildDevcontainerPostgresConnectionString()), "ConnectionStrings:DefaultConnection / Postgres:ConnectionString / DATABASE_CONNECTION_STRING / POSTGRES_DB + POSTGRES_USER + POSTGRES_PASSWORD");
 builder.Services.AddDbContext<AwaverDbContext>(options => options.UseNpgsql(postgresConnectionString, npgsql => npgsql.MapEnum<DrowsinessLevel>("drowsiness_level")));
 builder.Services.AddScoped<ISessionRepository, EfSessionRepository>();
+builder.Services.AddSingleton<BackendObservability>();
+builder.Services.AddSingleton<IAnalysisResultObservability>(provider => provider.GetRequiredService<BackendObservability>());
+builder.Services.AddSingleton<IAnalysisOutboxObservability>(provider => provider.GetRequiredService<BackendObservability>());
 builder.Services.AddSingleton(new AuthCookieOptions { IsDevelopment = builder.Environment.IsDevelopment() });
 builder.Services.AddScoped<AuthSessionService>();
 var backendTopology = BackendTopologyOptions.Load(builder.Configuration);

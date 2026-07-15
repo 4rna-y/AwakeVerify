@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
@@ -15,7 +16,7 @@ namespace Awaver.Backend.Controllers;
 
 [ApiController]
 [Route("api/sessions/{sessionId:guid}")]
-public sealed class AnalysisResultsController(AwaverDbContext dbContext, AnalysisResultBroadcaster broadcaster, AuthSessionService? authSessions = null) : ControllerBase
+public sealed class AnalysisResultsController(AwaverDbContext dbContext, AnalysisResultBroadcaster broadcaster, AuthSessionService? authSessions = null, IAnalysisResultObservability? observability = null) : ControllerBase
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -63,42 +64,97 @@ public sealed class AnalysisResultsController(AwaverDbContext dbContext, Analysi
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> PublishAnalysisResult(Guid sessionId, JsonElement payload, CancellationToken cancellationToken)
     {
-        if (!await dbContext.LearningSessions.AnyAsync(item => item.SessionId == sessionId, cancellationToken)) return NotFound("Session not found.");
-        if (payload.ValueKind != JsonValueKind.Object) return BadRequest("Analysis result must be a JSON object.");
-        if (!TryGetString(payload, "type", out var type) || type is not ("drowsiness_score" or "tracking_status" or "calibration_status")) return BadRequest("Unsupported analysis result type.");
-        if (!TryGetString(payload, "sessionId", out var payloadSessionId) || !Guid.TryParse(payloadSessionId, out var parsedSessionId) || parsedSessionId != sessionId) return BadRequest("sessionId must match the route sessionId.");
-
+        var requestStopwatch = Stopwatch.StartNew();
+        var outcome = "persistence_error";
         IDbContextTransaction? transaction = null;
-        if (dbContext.Database.IsRelational()) transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+
         try
         {
-            var persistence = type switch
+            var sessionCheckStopwatch = Stopwatch.StartNew();
+            var sessionExists = false;
+            try
             {
-                "drowsiness_score" => await PersistScoreAsync(sessionId, payload, cancellationToken),
-                "calibration_status" => await PersistCalibrationAsync(sessionId, payload, cancellationToken),
-                _ => ValidateTrackingStatus(payload),
-            };
+                sessionExists = await dbContext.LearningSessions.AnyAsync(item => item.SessionId == sessionId, cancellationToken);
+            }
+            finally
+            {
+                observability?.RecordStage("session_existence", sessionCheckStopwatch.Elapsed);
+            }
+            if (!sessionExists)
+            {
+                outcome = "not_found";
+                return NotFound("Session not found.");
+            }
+
+            string type = string.Empty;
+            PersistenceResult persistence;
+            var persistenceStopwatch = Stopwatch.StartNew();
+            try
+            {
+                if (payload.ValueKind != JsonValueKind.Object)
+                {
+                    outcome = "bad_request";
+                    return BadRequest("Analysis result must be a JSON object.");
+                }
+                if (!TryGetString(payload, "type", out type) || type is not ("drowsiness_score" or "tracking_status" or "calibration_status"))
+                {
+                    outcome = "bad_request";
+                    return BadRequest("Unsupported analysis result type.");
+                }
+                if (!TryGetString(payload, "sessionId", out var payloadSessionId) || !Guid.TryParse(payloadSessionId, out var parsedSessionId) || parsedSessionId != sessionId)
+                {
+                    outcome = "bad_request";
+                    return BadRequest("sessionId must match the route sessionId.");
+                }
+
+                if (dbContext.Database.IsRelational()) transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+                persistence = type switch
+                {
+                    "drowsiness_score" => await PersistScoreAsync(sessionId, payload, cancellationToken),
+                    "calibration_status" => await PersistCalibrationAsync(sessionId, payload, cancellationToken),
+                    _ => ValidateTrackingStatus(payload),
+                };
+            }
+            finally
+            {
+                observability?.RecordStage("type_specific_persistence_validation", persistenceStopwatch.Elapsed);
+            }
+
             if (persistence.Error is not null)
             {
                 if (transaction is not null) await transaction.RollbackAsync(cancellationToken);
+                outcome = persistence.Error is ConflictObjectResult ? "conflict" : "bad_request";
                 return persistence.Error;
             }
             if (persistence.AlreadyAccepted)
             {
-                if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+                await CommitTransactionAsync(transaction, cancellationToken);
+                outcome = "idempotent";
                 return Accepted();
             }
 
-            var idempotencyKey = CreateIdempotencyKey(sessionId, type, payload);
-            var existingEvent = await dbContext.AnalysisEventOutbox.SingleOrDefaultAsync(item => item.IdempotencyKey == idempotencyKey, cancellationToken);
+            var idempotencyLookupStopwatch = Stopwatch.StartNew();
+            AnalysisEventOutbox? existingEvent;
+            string idempotencyKey;
+            try
+            {
+                idempotencyKey = CreateIdempotencyKey(sessionId, type, payload);
+                existingEvent = await dbContext.AnalysisEventOutbox.SingleOrDefaultAsync(item => item.IdempotencyKey == idempotencyKey, cancellationToken);
+            }
+            finally
+            {
+                observability?.RecordStage("outbox_idempotency_lookup", idempotencyLookupStopwatch.Elapsed);
+            }
             if (existingEvent is not null)
             {
                 if (PayloadsMatch(existingEvent.Payload, payload))
                 {
-                    if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+                    await CommitTransactionAsync(transaction, cancellationToken);
+                    outcome = "idempotent";
                     return Accepted();
                 }
                 if (transaction is not null) await transaction.RollbackAsync(cancellationToken);
+                outcome = "conflict";
                 return Conflict("The analysis event idempotency key was already accepted with different data.");
             }
 
@@ -111,18 +167,59 @@ public sealed class AnalysisResultsController(AwaverDbContext dbContext, Analysi
                 CreatedAt = DateTimeOffset.UtcNow,
                 NextAttemptAt = DateTimeOffset.UtcNow,
             });
-            await dbContext.SaveChangesAsync(cancellationToken);
-            if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+            var saveChangesStopwatch = Stopwatch.StartNew();
+            try
+            {
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
+            finally
+            {
+                observability?.RecordStage("save_changes", saveChangesStopwatch.Elapsed);
+            }
+            await CommitTransactionAsync(transaction, cancellationToken);
+            outcome = "accepted";
             return Accepted();
         }
         catch (DbUpdateException)
         {
             if (transaction is not null) await transaction.RollbackAsync(cancellationToken);
+            outcome = "conflict";
             return Conflict("The analysis result conflicts with an already accepted result.");
+        }
+        catch
+        {
+            outcome = "persistence_error";
+            throw;
         }
         finally
         {
-            if (transaction is not null) await transaction.DisposeAsync();
+            try
+            {
+                if (transaction is not null) await transaction.DisposeAsync();
+            }
+            catch
+            {
+                outcome = "persistence_error";
+                throw;
+            }
+            finally
+            {
+                observability?.RecordRequest(outcome, requestStopwatch.Elapsed);
+            }
+        }
+
+        async Task CommitTransactionAsync(IDbContextTransaction? activeTransaction, CancellationToken token)
+        {
+            if (activeTransaction is null) return;
+            var commitStopwatch = Stopwatch.StartNew();
+            try
+            {
+                await activeTransaction.CommitAsync(token);
+            }
+            finally
+            {
+                observability?.RecordStage("transaction_commit", commitStopwatch.Elapsed);
+            }
         }
     }
 
