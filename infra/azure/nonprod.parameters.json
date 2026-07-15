@@ -37,6 +37,7 @@
     "managedRedisSkuName": { "value": "Balanced_B0" },
     "signalrSkuName": { "value": "Standard_S1" },
     "signalrCapacity": { "value": 1 },
+    "workerEntraValidIssuer": { "value": "https://sts.windows.net/8d41d6d7-36ce-4e0c-8c6d-cf2c54c39039/" },
     "outboxBatchSize": { "value": 100 },
     "outboxPollIntervalMs": { "value": 250 },
     "outboxLeaseSeconds": { "value": 30 },

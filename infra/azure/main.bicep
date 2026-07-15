@@ -136,6 +136,9 @@ param workerEntraAuthority string
 @description('Microsoft Entra audience/Application ID URI accepted by Backend.')
 param workerEntraAudience string
 
+@description('Issuer expected from the Worker managed identity access token.')
+param workerEntraValidIssuer string
+
 @description('Worker token scope, normally the Backend Application ID URI followed by /.default.')
 param workerBackendTokenScope string
 
@@ -524,6 +527,10 @@ resource backendApp 'Microsoft.Web/sites@2023-12-01' = if (deployWorkloads) {
         {
           name: 'Worker__Entra__Audience'
           value: workerEntraAudience
+        }
+        {
+          name: 'Worker__Entra__ValidIssuer'
+          value: workerEntraValidIssuer
         }
         {
           name: 'OUTBOX_BATCH_SIZE'

@@ -57,6 +57,9 @@ builder.Services.AddAuthentication(options =>
     {
         options.Authority = builder.Configuration["Worker:Entra:Authority"];
         options.Audience = builder.Configuration["Worker:Entra:Audience"];
+        // Preserve the Entra app-role claim as `roles`; AnalysisWorker explicitly
+        // authorizes the `analysis_worker` application role rather than a mapped URI claim.
+        options.MapInboundClaims = false;
         options.RequireHttpsMetadata = !builder.Environment.IsDevelopment() && !builder.Environment.IsEnvironment("Testing");
         options.TokenValidationParameters = new TokenValidationParameters
         {
