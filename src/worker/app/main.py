@@ -107,7 +107,7 @@ class WorkerConfig:
     blob_container_name: str
     redis_connection_string: str | None = None
     redis_cluster_mode: bool = False
-    worker_api_key: str | None = None,
+    worker_api_key: str | None = None
     worker_auth_mode: str = "api_key"
     worker_backend_token_scope: str | None = None
     worker_backend_client_id: str | None = None
@@ -429,8 +429,14 @@ class AnalysisResultPublisher:
         except HTTPError as error:
             self._raise_for_status(error.code)
             raise AssertionError("unreachable")
-        except (URLError, TimeoutError, OSError) as error:
-            raise RetryableResultPublishError("analysis result API is temporarily unavailable") from error
+        except TimeoutError as error:
+            raise RetryableResultPublishError("analysis result API request timed out") from error
+        except URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                raise RetryableResultPublishError("analysis result API request timed out") from error
+            raise RetryableResultPublishError("analysis result API connection failed") from error
+        except OSError as error:
+            raise RetryableResultPublishError("analysis result API connection failed") from error
 
         # The API's 202 is the persistence + Outbox acceptance boundary. Any other 2xx
         # response is intentionally not treated as success.
@@ -455,8 +461,14 @@ class AnalysisResultPublisher:
         except HTTPError as error:
             self._raise_for_status(error.code)
             raise AssertionError("unreachable")
-        except (URLError, TimeoutError, OSError) as error:
-            raise RetryableResultPublishError("calibration API is temporarily unavailable") from error
+        except TimeoutError as error:
+            raise RetryableResultPublishError("calibration API request timed out") from error
+        except URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                raise RetryableResultPublishError("calibration API request timed out") from error
+            raise RetryableResultPublishError("calibration API connection failed") from error
+        except OSError as error:
+            raise RetryableResultPublishError("calibration API connection failed") from error
 
         try:
             payload = json.loads(raw.decode("utf-8"))

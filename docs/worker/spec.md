@@ -72,7 +72,7 @@ WorkerはService Busから以下のメッセージを受信する。
 Service Busでは `sessionId` をSession IDとして使用する。WorkerはSession有効queueから同一 `sessionId` のメッセージを順序どおりに処理し、同一Sessionを並行処理しない。
 
 - Blob取得、JPEGデコード、順序どおりのSession状態更新、およびそのフレーム由来のBackend解析結果API受理のすべてが成功した場合だけ `complete` する。
-- Blob取得の一時失敗、Backendのtimeout・5xx・429、Redis一時障害は `abandon` して再配送する。最大配送回数に達した場合はdead-letterする。
+- Blob取得の一時失敗、Backendのtimeout・接続失敗・5xx・429、Redis一時障害は `abandon` して再配送する。最大配送回数に達した場合はdead-letterする。WorkerログではBackend API URL、token、payload、学生IDを出さず、timeout、接続失敗、HTTP応答を区別して記録する。
 - Blob path不正、対応外codec、payload検証エラー、Worker資格情報の失効など再試行不能なエラーはdead-letterする。
 - 重複配送は `sessionId` と `sequenceNo` で冪等に無視する。`sequenceNo` の欠落・順序不整合は後続の独立JPEGを破棄する理由にしない。
 - `NEXT_AVAILABLE_SESSION` で受信する場合、Workerはreceiver作成時に5秒のセッション取得タイムアウトを指定する。空queueでセッションを取得できない場合、SDKは `OperationTimeoutError` を返す。これは異常ではないためWorkerはwarningを出さずreceiverを閉じ、次回pollで再試行する。これにより、セッション取得待機中にbrokerのアイドルリンク切断を受けない。

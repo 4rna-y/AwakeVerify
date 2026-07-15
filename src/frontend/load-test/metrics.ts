@@ -1,6 +1,8 @@
 export type Summary = {
     sessionsCreated: number;
+    framesOffered: number;
     framesSent: number;
+    framesNotSentDueToInFlightLimit: number;
     acknowledgements: number;
     negativeAcknowledgements: number;
     retransmissions: number;
@@ -24,7 +26,9 @@ export type LatencySummary = {
 export class Metrics {
     private readonly counters = {
         sessionsCreated: 0,
+        framesOffered: 0,
         framesSent: 0,
+        framesNotSentDueToInFlightLimit: 0,
         acknowledgements: 0,
         negativeAcknowledgements: 0,
         retransmissions: 0,

@@ -8,7 +8,7 @@ from email.message import Message
 from typing import Any, cast
 from unittest import TestCase
 from unittest.mock import MagicMock, call, patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import app.main as worker_main
 from app.analyzer.frame_decoder import FrameDecoder, FrameReference
@@ -383,6 +383,28 @@ class WorkerReliabilityTests(TestCase):
                 api_key="worker-secret",
                 timeout_seconds=2,
                 opener=unavailable,
+            ).publish(self.session_id, {})
+
+        def timed_out(request: Any, *, timeout: float) -> object:
+            raise TimeoutError("socket timed out")
+
+        with self.assertRaisesRegex(RetryableResultPublishError, "analysis result API request timed out"):
+            AnalysisResultPublisher(
+                "http://backend",
+                api_key="worker-secret",
+                timeout_seconds=2,
+                opener=timed_out,
+            ).publish(self.session_id, {})
+
+        def connection_failed(request: Any, *, timeout: float) -> object:
+            raise URLError(OSError("connection reset"))
+
+        with self.assertRaisesRegex(RetryableResultPublishError, "analysis result API connection failed"):
+            AnalysisResultPublisher(
+                "http://backend",
+                api_key="worker-secret",
+                timeout_seconds=2,
+                opener=connection_failed,
             ).publish(self.session_id, {})
 
     def test_entra_auth_provider_sends_bearer_and_caches_token_in_memory(self) -> None:

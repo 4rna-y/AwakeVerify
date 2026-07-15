@@ -36,13 +36,13 @@ pnpm --dir src/frontend load-test
 | --- | ---: | --- |
 | `CONCURRENT_SESSIONS` | `2` | 同時に作る独立受講 Session 数。正の整数。 |
 | `DURATION_SECONDS` | `10` | 各仮想 Session の送信時間。正の整数。ramp-up 時間は含まない。 |
-| `FRAMES_PER_SECOND` | `1` | Session ごとの送信 fps。有限の正数。 |
+| `FRAMES_PER_SECOND` | `1` | Session ごとの requested/offered fps。有限の正数。ACK待機やローカル送信上限により実送信数が下回る場合は結果レポートで可視化する。 |
 | `FRAME_FIXTURE` | `load-test/fixtures/transport-test.jpg` | 単独デコード可能な JPEG fixture のパス。 |
 | `API_BASE_URL` | `http://localhost:5194` | Backend の HTTP(S) base URL。Worker を指定してはならない。 |
 | `ALLOW_AZURE_LOAD_TEST` | `false` | Azure App Service / Azure Container Apps の HTTPS endpoint 実行に必要な明示 opt-in。 |
 | `RAMP_UP_SECONDS` | `0` | 最初と最後の Session 作成の間隔合計。0 以上の整数。 |
 | `RESULT_TIMEOUT_SECONDS` | `15` | 送信後に ACK / 解析通知を待機する時間。正の整数。 |
-| `MAX_IN_FLIGHT_FRAMES` | `5` | Session ごとの未 ACK 上限。正の整数。 |
+| `MAX_IN_FLIGHT_FRAMES` | `5` | Session ごとの未 ACK 上限。正の整数。上限到達時は primary frame を送信せず、`framesNotSentDueToInFlightLimit` に記録する。 |
 | `OUTPUT_PATH` | `load-test-results/report.json` | 機械可読レポート出力先。 |
 | `FAULT_INJECTION` | 空 | `signalr-reconnect`,`ws-reconnect`,`skip-sequence`,`duplicate-frame` をカンマ区切りで指定。 |
 
@@ -83,7 +83,7 @@ Azure で実行する際は、検証用 Backend の `/health/ready` が利用可
 
 ## 測定値と判定
 
-レポートの `summary` には作成 Session 数、送信 frame 数、ACK/NACK、再送、WebSocket 接続失敗・再接続、SignalR 再接続、解析結果、誤配送、ACK timeout、総時間を記録します。`frameToResultLatencyMs` は `sourceSequenceNo` を持つ解析通知だけを frame 送信時刻と対応付けて p50 / p95 / max を算出します。通知契約上すべての frame が解析通知を出すわけではないため、latency sample 数は送信数と一致しないことがあります。
+レポートの `summary` には作成 Session 数、requested/offered frame 数（`framesOffered`）、実送信 frame 数（`framesSent`）、in-flight 上限により送信されなかった offered frame 数（`framesNotSentDueToInFlightLimit`）、ACK/NACK、再送、WebSocket 接続失敗・再接続、SignalR 再接続、解析結果、誤配送、ACK timeout、総時間を記録します。`framesSent` は `duplicate-frame` 障害注入による追加送信を含むため、offered frame 数と一致しない場合があります。`frameToResultLatencyMs` は `sourceSequenceNo` を持つ解析通知だけを frame 送信時刻と対応付けて p50 / p95 / max を算出します。通知契約上すべての frame が解析通知を出すわけではないため、latency sample 数は送信数と一致しないことがあります。
 
 `assertions` は以下を出力します。
 

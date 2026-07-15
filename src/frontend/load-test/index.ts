@@ -101,6 +101,7 @@ class VirtualSession {
                     injected = true;
                     await this.injectConfiguredFaults();
                 }
+                this.metrics.increment("framesOffered");
                 await this.sendNextFrame();
                 await delay(Math.max(1, Math.round(1000 / this.config.framesPerSecond)));
             }
@@ -174,7 +175,10 @@ class VirtualSession {
 
     private async sendNextFrame(): Promise<void> {
         if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
-        if (this.pendingFrames.size >= this.config.maxInFlightFrames) return;
+        if (this.pendingFrames.size >= this.config.maxInFlightFrames) {
+            this.metrics.increment("framesNotSentDueToInFlightLimit");
+            return;
+        }
 
         let sequenceNo = this.nextSequenceNo;
         this.nextSequenceNo += 1;

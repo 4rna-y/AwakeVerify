@@ -350,6 +350,21 @@ resource workerReceiverRule 'Microsoft.ServiceBus/namespaces/authorizationRules@
   }
 }
 
+// KEDA must read queue runtime properties to calculate the ACA replica count.
+// Keep this scoped to the queue and separate from the Worker's Listen-only credential.
+resource workerScalerRule 'Microsoft.ServiceBus/namespaces/queues/authorizationRules@2022-10-01-preview' = {
+  parent: frameQueue
+  name: 'worker-scaler-manage'
+  properties: {
+    rights: [
+      // Service Bus requires Send and Listen to accompany Manage on a SAS policy.
+      'Manage'
+      'Send'
+      'Listen'
+    ]
+  }
+}
+
 resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
   name: postgresServerName
   location: location
@@ -640,6 +655,10 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkload
           value: workerReceiverRule.listKeys().primaryConnectionString
         }
         {
+          name: 'worker-scaler-servicebus-connection'
+          value: workerScalerRule.listKeys().primaryConnectionString
+        }
+        {
           name: 'redis-connection'
           value: redisConnectionString
         }
@@ -761,7 +780,7 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkload
               auth: [
                 {
                   triggerParameter: 'connection'
-                  secretRef: 'worker-servicebus-connection'
+                  secretRef: 'worker-scaler-servicebus-connection'
                 }
               ]
             }

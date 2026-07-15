@@ -23,7 +23,7 @@
 - `activeRevisionsMode` は `Single`。古い revision が古い scale rule で backlog を消費しないようにする。
 - Worker の ACA termination grace period は `workerTerminationGracePeriodSeconds`。必ず `workerShutdownTimeoutSeconds` より大きく設定する。
 - Backend は `BACKEND_EXPECTED_INSTANCE_COUNT=backendMaxInstances` として起動する。このため複数 instance 時の Azure SignalR と Redis registry の必須契約が常に有効になる。
-- Backend は Service Bus の `Send` 専用 SAS、Worker は `Listen` 専用 SAS を受け取る。
+- Backend は Service Bus の `Send` 専用 SAS、Worker は `Listen` 専用 SAS を受け取る。ACA scaler は queue runtime metrics を読むため、Worker プロセスへ渡さない queue-scoped `Manage` 専用 SAS を別 secret として使用する。
 - Blob は Backend 用に read/add/create/write/delete/list、Worker 用に read/list の短期 Account SAS を生成する。SAS は `blobSasExpiry` で失効するため、負荷試験中に期限を過ぎない値を設定し、不要になれば Storage account ごと削除する。
 - GHCR image は public とし、Azure の registry credential や `AcrPull` role assignment を使わない。Worker の System Assigned Managed Identity には、Entra ID の管理操作として `analysis_worker` app role を別途割り当てる。
 

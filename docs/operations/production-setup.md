@@ -113,7 +113,7 @@ Azure__BlobStorage__ContainerName
 3. **Sessionを必ず有効化**する。
 4. 最大配送回数、lock duration、dead-letter監視、アラートを設定する。
 5. BackendからWorkerへ渡すフレームは、`sessionId` をService Bus Session IDとして送る。
-6. Backendには送信権限、Workerには受信・complete・abandon・dead-letterのための権限を最小限で与える。
+6. Backendには送信権限、Workerには受信・complete・abandon・dead-letterのための権限を最小限で与える。ACA Service Bus scaler を使う場合は、Worker runtime credential を広げず、queue runtime metrics 読み取り用の `Manage` SAS を scaler 専用 secret として分離する。
 
 現行実装は接続文字列を使用する。
 
