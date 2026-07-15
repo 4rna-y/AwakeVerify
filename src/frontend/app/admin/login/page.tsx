@@ -95,13 +95,13 @@ export default function AdminLoginPage() {
     }
 
     if (guardState === "checking") {
-        return <main className="min-h-screen p-6">認証状態を確認しています...</main>;
+        return <main className="min-h-dvh p-4 md:min-h-screen md:p-6">認証状態を確認しています...</main>;
     }
 
     if (guardState === "forbidden") {
         return (
-            <main className="flex min-h-screen items-center justify-center p-6">
-                <Alert variant="destructive" className="w-full max-w-md">
+            <main className="flex min-h-dvh items-center justify-center overflow-y-auto p-4 md:min-h-screen md:p-6">
+                <Alert variant="destructive" className="w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto md:max-h-none md:overflow-visible">
                     <AlertTitle>権限がありません</AlertTitle>
                     <AlertDescription className="flex flex-col gap-3">
                         <span>{message}</span>
@@ -116,8 +116,8 @@ export default function AdminLoginPage() {
 
     const canSubmit = submitState !== "submitting" && !!adminId.trim() && !!password;
     return (
-        <main className="flex min-h-screen items-center justify-center p-6">
-            <Card className="w-full max-w-sm">
+        <main className="flex min-h-dvh items-center justify-center overflow-y-auto p-4 md:min-h-screen md:p-6">
+            <Card className="w-full max-w-sm max-h-[calc(100dvh-2rem)] overflow-y-auto md:max-h-none md:overflow-visible">
                 <CardHeader><CardTitle>管理者ログイン</CardTitle></CardHeader>
                 <CardContent>
                     <form className="flex flex-col gap-4" onSubmit={submitLogin}>

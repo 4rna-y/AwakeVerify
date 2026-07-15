@@ -18,6 +18,7 @@
 | `teacher-dashboard-review.md` | 教員による受講状況確認 | 教員がログインし、受講セッション・眠気スコア・停止イベントを確認する。 |
 | `admin-teacher-onboarding.md` | 管理者による教員追加から教員ログインまで | 管理者が教員アカウントを追加し、教員がログイン可能になる。 |
 | `multi-session-dynamic-distribution.md` | 複数受講セッションの動的分散 | 複数Sessionを順序保証付きで分散処理し、停止・障害・水平スケール時の回復を確認する。 |
+| `scheduled-demo-readiness.md` | Azure予約デモ準備 | 予約デモ前のwarm-up、主要シナリオ、active monitoring、fallbackおよび終了後のscale-downを確認する。 |
 
 ## シナリオ記述方針
 

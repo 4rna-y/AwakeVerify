@@ -61,7 +61,7 @@
 - Worker からの再送、Outbox の crash 境界による再試行でも、解析結果は既存の冪等キーにより重複保存されない。通知は at-least-once のため重複受信を許容する。
 - Backend 接続 instance と Outbox 処理 instance が異なっても、対象 Session の認可済み接続へ通知が届く。
 - 設定済みの最大 replica に達した場合、未処理フレームは backlog として残り、最古メッセージ年齢、Outbox 年齢、上限到達状況を監視できる。
-- 鮮度SLOを検証する開始burstでは、試験開始前に実Readyの最小Worker slot数が対象Session数以上である。30 Session・5fpsの受け入れ試験では、3 slot/replicaの場合に少なくとも10 replicaをreadyにし、HTTP frame送信開始から対応するSignalR解析通知受信までがp95 2秒以下、p99 5秒以下である。autoscaleで後から起動したreplicaはこの開始容量に数えない。
+- 鮮度SLOを検証する開始burstでは、試験開始前に実Readyの最小Worker slot数が対象Session数以上である。30 Session・5fpsの受け入れ試験では、3 slot/replicaの場合に少なくとも12 replica（36 slot）をreadyにし、Session lock引継ぎと短い結果送信tailのため6 slotの余力を確保する。HTTP frame送信開始から対応するSignalR解析通知受信までがp95 2秒以下、p99 5秒以下である。autoscaleで後から起動したreplicaはこの開始容量に数えない。
 
 ## 7. 例外・分岐
 

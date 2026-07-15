@@ -186,7 +186,7 @@ export default function AdminDashboardPage() {
 
     if (guardState === "checking") {
         return (
-            <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-6 p-6">
+            <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-6 p-4 md:p-6">
                 <Skeleton className="h-8 w-64" />
                 <Skeleton className="h-64 w-full" />
             </main>
@@ -195,7 +195,7 @@ export default function AdminDashboardPage() {
 
     if (guardState === "forbidden") {
         return (
-            <main className="flex min-h-screen items-center justify-center p-6">
+            <main className="flex min-h-screen items-center justify-center p-4 md:p-6">
                 <Alert variant="destructive" className="w-full max-w-md">
                     <AlertTitle>権限がありません</AlertTitle>
                     <AlertDescription className="flex flex-col gap-3">
@@ -210,7 +210,7 @@ export default function AdminDashboardPage() {
     }
 
     return (
-        <main className="mx-auto flex max-w-6xl flex-col gap-6 p-6">
+        <main className="mx-auto flex max-w-6xl flex-col gap-6 p-4 md:p-6">
             <div className="flex flex-wrap items-center justify-between gap-4">
                 <h1 className="font-heading text-xl font-medium">管理者ダッシュボード</h1>
                 <div className="flex flex-wrap items-center gap-2">
@@ -234,7 +234,7 @@ export default function AdminDashboardPage() {
                 <CardHeader>
                     <CardTitle>フィルタ</CardTitle>
                 </CardHeader>
-                <CardContent className="grid gap-4 md:grid-cols-2 lg:grid-cols-6">
+                <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-6">
                     <div className="grid gap-2">
                         <Label htmlFor="student-filter">学籍番号</Label>
                         <Input id="student-filter" value={studentFilter} onChange={(event) => setStudentFilter(event.target.value)} placeholder="学籍番号で検索" />
@@ -274,8 +274,9 @@ export default function AdminDashboardPage() {
                     <CardTitle>受講セッション（{filteredSessions.length}件）</CardTitle>
                 </CardHeader>
                 <CardContent>
-                    <Table>
-                        <TableHeader>
+                    <div className="overflow-x-auto md:overflow-x-visible">
+                        <Table className="min-w-180 md:min-w-0">
+                            <TableHeader>
                             <TableRow>
                                 <TableHead>動画 ID</TableHead>
                                 <TableHead>学籍番号</TableHead>
@@ -313,8 +314,9 @@ export default function AdminDashboardPage() {
                                     </TableRow>
                                 ))
                             )}
-                        </TableBody>
-                    </Table>
+                            </TableBody>
+                        </Table>
+                    </div>
                 </CardContent>
             </Card>
 
@@ -325,7 +327,7 @@ export default function AdminDashboardPage() {
                     setDeletionState("idle");
                 }
             }}>
-                <DialogContent showCloseButton={deletionState !== "deleting"}>
+                <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" showCloseButton={deletionState !== "deleting"}>
                     <DialogHeader>
                         <DialogTitle>受講記録を削除しますか？</DialogTitle>
                         <DialogDescription>

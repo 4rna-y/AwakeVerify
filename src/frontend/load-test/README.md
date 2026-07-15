@@ -10,7 +10,8 @@
 
 ```sh
 pnpm --dir src/frontend install --frozen-lockfile
-pnpm --dir src/frontend load-test
+FRAME_FIXTURE=/absolute/path/to/your-test-image.jpg \\
+  pnpm --dir src/frontend load-test
 ```
 
 Backend、Worker、PostgreSQL、Redis、Azurite、Service Bus Emulator を起動してから、まず安全なローカル既定値（2 Session、10 秒、1 fps）で実行します。結果は既定で `src/frontend/load-test-results/report.json` に JSON 出力されます。通常出力とレポートには API URL、Cookie、token、学生 ID、`sessionId`、raw JPEG を含めません。
@@ -22,7 +23,7 @@ Backend、Worker、PostgreSQL、Redis、Azurite、Service Bus Emulator を起動
 | `CONCURRENT_SESSIONS` | `2` | 同時に作る独立受講 Session 数。正の整数。 |
 | `DURATION_SECONDS` | `10` | 各仮想 Session の送信時間。正の整数。 |
 | `FRAMES_PER_SECOND` | `1` | Session ごとの capture / offered fps。有限の正数。 |
-| `FRAME_FIXTURE` | `load-test/fixtures/transport-test.jpg` | 単独デコード可能な 640×480 JPEG fixture。既定fixtureは合成画像であり、transport/decode・顔未検出通知経路の負荷用である。 |
+| `FRAME_FIXTURE` | 必須 | 単独デコード可能なローカル JPEG fixture のパス。個人画像・実カメラ画像は必ず Git 管理外に置く。 |
 | `API_BASE_URL` | `http://localhost:5194` | Backend の HTTP(S) base URL。Worker を指定してはならない。 |
 | `ALLOW_AZURE_LOAD_TEST` | `false` | Azure HTTPS endpoint 実行に必要な明示 opt-in。 |
 | `RAMP_UP_SECONDS` | `0` | 最初と最後の Session 作成の間隔合計。0 以上の整数。 |
@@ -45,7 +46,7 @@ Session ごとに最大 1 HTTP request だけを in-flight にします。次の
 
 `skip-sequence` は後続の独立 JPEG が欠番後も受理・処理可能であることを確認します。`duplicate-frame` は同一 bytes / metadata で同じ route を再 POST して冪等性を確認します。`signalr-reconnect` は解析通知の再接続と `JoinSession` の復元を確認します。
 
-既定fixtureは利用許諾済みの顔画像ではないため、顔ランドマーク検出成功時の推論能力を保証するものではありません。実カメラ相当の顔検出・PERCLOS性能を受け入れる試験では、利用許諾済みで単独デコード可能なカメラ画像を `FRAME_FIXTURE` に明示指定し、同じ SLO 判定を実行します。
+実カメラ相当の顔検出・PERCLOS性能を受け入れる試験では、利用許諾済みで単独デコード可能なカメラ画像を `FRAME_FIXTURE` に明示指定し、同じ SLO 判定を実行します。画像は Git、負荷試験レポート、通常ログへ含めません。
 
 ## 測定値と判定
 

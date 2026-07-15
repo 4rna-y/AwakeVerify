@@ -167,6 +167,7 @@ export default function StudentSessionPage() {
     const [autoPauseReason, setAutoPauseReason] =
         useState<AutoPauseReason | null>(null);
     const [areControlsVisible, setAreControlsVisible] = useState(true);
+    const [isBadgeDetailsVisible, setIsBadgeDetailsVisible] = useState(false);
 
     const lessonVideoRef = useRef<HTMLVideoElement | null>(null);
     const cameraCaptureVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -1320,11 +1321,11 @@ export default function StudentSessionPage() {
         : "pointer-events-none opacity-0";
 
     return (
-        <main className="relative h-screen w-screen overflow-hidden">
+        <main className="relative h-dvh w-full overflow-hidden bg-black md:h-screen md:w-screen md:bg-transparent">
             <video
                 ref={lessonVideoRef}
                 src={isCalibrationDone ? lessonVideoUrl : undefined}
-                className="h-full w-full object-cover"
+                className="h-full w-full object-contain md:object-cover"
                 playsInline
                 preload="metadata"
                 onLoadedMetadata={handleLessonMetadataLoaded}
@@ -1355,17 +1356,23 @@ export default function StudentSessionPage() {
             )}
 
             <header
-                className={`absolute top-0 right-0 left-0 z-10 flex items-center justify-between gap-4 bg-black/60 px-6 py-3 text-white transition-opacity duration-150 ${controlsVisibilityClass}`}
+                className={`absolute top-0 right-0 left-0 z-10 flex flex-col items-stretch gap-2 bg-black/60 px-4 py-3 pt-[max(0.75rem,env(safe-area-inset-top))] text-white transition-opacity duration-150 md:flex-row md:items-center md:justify-between md:gap-4 md:px-6 md:py-3 md:pt-3 ${controlsVisibilityClass}`}
             >
                 <span className="min-w-0 truncate font-medium">
                     {lessonVideoFileName}
                 </span>
-                <div className="group/badges flex shrink-0 gap-2">
+                <button
+                    type="button"
+                    className="group/badges flex shrink-0 flex-wrap gap-2"
+                    aria-label="受講状態の詳細を表示または非表示にする"
+                    aria-expanded={isBadgeDetailsVisible}
+                    onClick={() => setIsBadgeDetailsVisible((visible) => !visible)}
+                >
                     <Badge variant="secondary">受講者</Badge>
                     <Badge>{isCameraSending ? "カメラ送信中" : "カメラ待機中"}</Badge>
                     {latestScore && (
                         <Badge
-                            className="hidden group-hover/badges:inline-flex group-focus-within/badges:inline-flex"
+                            className={isBadgeDetailsVisible ? "inline-flex" : "hidden group-hover/badges:inline-flex group-focus-within/badges:inline-flex"}
                             variant={
                                 shouldAutoPause(latestScore)
                                     ? "destructive"
@@ -1375,13 +1382,13 @@ export default function StudentSessionPage() {
                             score {latestScore.score.toFixed(2)} / {latestScore.level}
                         </Badge>
                     )}
-                </div>
+                </button>
             </header>
 
             <footer
-                className={`absolute right-0 bottom-0 left-0 z-10 flex flex-col gap-3 bg-black/60 px-6 py-4 text-white transition-opacity duration-150 ${controlsVisibilityClass}`}
+                className={`absolute right-0 bottom-0 left-0 z-10 flex flex-col gap-3 bg-black/60 px-4 py-4 pb-[max(1rem,env(safe-area-inset-bottom))] text-white transition-opacity duration-150 md:px-6 md:py-4 md:pb-4 ${controlsVisibilityClass}`}
             >
-                <div className="flex items-center gap-3">
+                <div className="flex min-w-0 items-center gap-3">
                     <Button
                         type="button"
                         size="icon"
@@ -1405,6 +1412,7 @@ export default function StudentSessionPage() {
                         )}
                     </Button>
                     <Slider
+                        className="min-w-0 flex-1"
                         value={[playbackPosition]}
                         max={lessonDurationSec}
                         disabled
@@ -1419,7 +1427,7 @@ export default function StudentSessionPage() {
             </footer>
 
             {message && (
-                <div className="absolute top-20 left-1/2 w-full max-w-md -translate-x-1/2 px-4">
+                <div className="absolute top-28 left-1/2 max-h-[calc(100dvh-12rem)] w-full max-w-md -translate-x-1/2 overflow-y-auto px-4 md:top-20 md:max-h-none md:overflow-visible">
                     <Alert
                         variant={
                             screenState === "error" ? "destructive" : "default"
@@ -1469,7 +1477,7 @@ export default function StudentSessionPage() {
             )}
 
             {latestTracking && !message && autoPauseState === "idle" && (
-                <div className="absolute top-20 left-1/2 w-full max-w-md -translate-x-1/2 px-4">
+                <div className="absolute top-28 left-1/2 max-h-[calc(100dvh-12rem)] w-full max-w-md -translate-x-1/2 overflow-y-auto px-4 md:top-20 md:max-h-none md:overflow-visible">
                     <Alert>
                         <AlertTitle>顔検出</AlertTitle>
                         <AlertDescription>
@@ -1483,7 +1491,7 @@ export default function StudentSessionPage() {
                 open={isFrameUploadErrorOpen}
                 onOpenChange={setIsFrameUploadErrorOpen}
             >
-                <DialogContent className="w-full max-w-md">
+                <DialogContent className="w-[calc(100%-2rem)] max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto md:w-full md:max-h-none md:overflow-visible">
                     <DialogHeader>
                         <DialogTitle>フレーム送信エラー</DialogTitle>
                         <DialogDescription>
@@ -1513,7 +1521,7 @@ export default function StudentSessionPage() {
                 open={isResultStreamErrorOpen}
                 onOpenChange={setIsResultStreamErrorOpen}
             >
-                <DialogContent className="w-full max-w-md">
+                <DialogContent className="w-[calc(100%-2rem)] max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto md:w-full md:max-h-none md:overflow-visible">
                     <DialogHeader>
                         <DialogTitle>解析イベント接続エラー</DialogTitle>
                         <DialogDescription>
@@ -1535,7 +1543,7 @@ export default function StudentSessionPage() {
             <Dialog open={isLoadingOpen}>
                 <DialogContent
                     showCloseButton={false}
-                    className="w-full max-w-md"
+                    className="w-[calc(100%-2rem)] max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto md:w-full md:max-h-none md:overflow-visible"
                 >
                     <DialogHeader>
                         <DialogTitle>接続確認</DialogTitle>
@@ -1589,7 +1597,7 @@ export default function StudentSessionPage() {
             <Dialog open={isCalibrationOpen}>
                 <DialogContent
                     showCloseButton={false}
-                    className="w-full max-w-xl"
+                    className="w-[calc(100%-2rem)] max-w-xl max-h-[calc(100dvh-2rem)] overflow-y-auto md:w-full md:max-h-none md:overflow-visible"
                 >
                     <DialogHeader>
                         <DialogTitle>キャリブレーション</DialogTitle>
@@ -1601,7 +1609,7 @@ export default function StudentSessionPage() {
                     <div className="flex flex-col gap-4">
                         <video
                             ref={setCalibrationPreviewVideoElement}
-                            className="aspect-4/3 w-full object-cover"
+                            className="aspect-4/3 max-h-[35dvh] w-full object-contain md:max-h-none md:object-cover"
                             muted
                             playsInline
                         />

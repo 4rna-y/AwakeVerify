@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   publish:
-    name: Publish Backend and Worker
+    name: Publish Frontend, Backend, and Worker
     runs-on: ubuntu-latest
 
     steps:
@@ -31,6 +31,33 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate Frontend build settings
+        env:
+          LESSON_VIDEO_URL: ${{ secrets.DEMO_LESSON_VIDEO_URL }}
+        run: |
+          if [ -z "$LESSON_VIDEO_URL" ]; then
+            echo "Repository secret DEMO_LESSON_VIDEO_URL is required." >&2
+            exit 1
+          fi
+
+      - name: Build and publish Frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: src/frontend
+          file: src/frontend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/awaver-frontend:${{ inputs.image_tag }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          build-args: |
+            NEXT_PUBLIC_API_BASE_URL=https://api.awaver.4rnay.net
+            NEXT_PUBLIC_BACKEND_HEALTH_URL=https://api.awaver.4rnay.net/health/ready
+            NEXT_PUBLIC_WORKER_HEALTH_URL=https://worker.api.awaver.4rnay.net/health/ready
+            NEXT_PUBLIC_LESSON_VIDEO_URL=${{ secrets.DEMO_LESSON_VIDEO_URL }}
+            NEXT_PUBLIC_LESSON_VIDEO_ID=60s
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build and publish Backend
         uses: docker/build-push-action@v6

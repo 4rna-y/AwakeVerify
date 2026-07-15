@@ -26,7 +26,6 @@ const defaults = {
     concurrentSessions: 2,
     durationSeconds: 10,
     framesPerSecond: 1,
-    frameFixture: "load-test/fixtures/transport-test_1.jpg",
     apiBaseUrl: "http://localhost:5194",
     allowAzureLoadTest: false,
     rampUpSeconds: 0,
@@ -43,7 +42,7 @@ export function loadConfig(
         concurrentSessions: positiveInteger(env.CONCURRENT_SESSIONS, "CONCURRENT_SESSIONS", defaults.concurrentSessions),
         durationSeconds: positiveInteger(env.DURATION_SECONDS, "DURATION_SECONDS", defaults.durationSeconds),
         framesPerSecond: positiveNumber(env.FRAMES_PER_SECOND, "FRAMES_PER_SECOND", defaults.framesPerSecond),
-        frameFixture: resolve(cwd, env.FRAME_FIXTURE ?? defaults.frameFixture),
+        frameFixture: requiredFixturePath(env.FRAME_FIXTURE, cwd),
         apiBaseUrl,
         allowAzureLoadTest: parseBoolean(env.ALLOW_AZURE_LOAD_TEST, "ALLOW_AZURE_LOAD_TEST", defaults.allowAzureLoadTest),
         rampUpSeconds: nonNegativeInteger(env.RAMP_UP_SECONDS, "RAMP_UP_SECONDS", defaults.rampUpSeconds),
@@ -59,6 +58,13 @@ export function loadConfig(
         throw new Error("ALLOW_AZURE_LOAD_TEST=true is required when API_BASE_URL is an Azure HTTPS endpoint.");
     }
     return config;
+}
+
+function requiredFixturePath(value: string | undefined, cwd: string): string {
+    if (value === undefined || value.trim() === "") {
+        throw new Error("FRAME_FIXTURE is required and must reference a locally available JPEG fixture.");
+    }
+    return resolve(cwd, value);
 }
 
 export function isAzureHttpsEndpoint(url: URL): boolean {

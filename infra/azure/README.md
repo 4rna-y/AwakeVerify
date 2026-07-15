@@ -21,7 +21,7 @@
 
 ## 重要な設計
 
-- Worker は `azure-servicebus` custom scale rule を使用する。`messageCount` は `workerScaleQueueThreshold` であり、`WORKER_SESSION_CONCURRENCY` とは別の環境容量設定である。今回の nonprod 検証値は 1 CPU / 2 GiB Worker、3 Session slot/replica、最低 10・最大 12 replica、20 active messages/replica とする。最低10 replica は30 Session slot、最大12 replica は36 Session slotを提供する。30 Session × 5fpsの試験は、全最低replicaが `/health/ready` になった後に開始し、frame-to-result の p95 2秒以下・p99 5秒以下を満たすことが受け入れ条件である。`20` は3 slot が取得する最大 batch（各 10 message 未満）より小さいため、継続的な backlog で早めに replica を増やす保守的な閾値である。10 秒の `workerScalingPollingIntervalSeconds` により、常時容量を超える backlog を既定の 30 秒ではなく最大 10 秒で検知する。
+- Worker は `azure-servicebus` custom scale rule を使用する。`messageCount` は `workerScaleQueueThreshold` であり、`WORKER_SESSION_CONCURRENCY` とは別の環境容量設定である。今回の nonprod 検証値は 1 CPU / 2 GiB Worker、3 Session slot/replica、最低 12・最大 15 replica、20 active messages/replica とする。最低12 replica は36 Session slot、最大15 replica は45 Session slotを提供する。30 Session × 5fpsの試験は、全最低replicaが `/health/ready` になった後に開始し、frame-to-result の p95 2秒以下・p99 5秒以下を満たすことが受け入れ条件である。最低12 replicaは、Session lock引継ぎ・短い結果送信tailのため30 Sessionに6 slotの余力を持たせる。`20` は3 slot が取得する最大 batch（各 10 message 未満）より小さいため、継続的な backlog で早めに replica を増やす保守的な閾値である。10 秒の `workerScalingPollingIntervalSeconds` により、常時容量を超える backlog を既定の 30 秒ではなく最大 10 秒で検知する。
 - Backend と Worker の `activeRevisionsMode` は `Single`。Backend revision 更新時は旧 revision が frame / result を二重処理しないこと、Worker revision 更新時は古い scale rule で backlog を消費しないことを確認する。
 - Worker の ACA termination grace period は `workerTerminationGracePeriodSeconds`。必ず `workerShutdownTimeoutSeconds` より大きく設定する。
 - Backend は `BACKEND_EXPECTED_INSTANCE_COUNT=backendMaxInstances` として起動する。このため複数 replica 時の Azure SignalR と Redis registry の必須契約が常に有効になる。

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { resolve } from "node:path";
 import { isAzureHttpsEndpoint, isHighLoad, loadConfig } from "./config";
@@ -7,13 +6,17 @@ import { isAzureHttpsEndpoint, isHighLoad, loadConfig } from "./config";
 const frontendRoot = resolve(import.meta.dirname, "..");
 
 test("uses safe local defaults and resolves the fixture", () => {
-    const config = loadConfig({}, frontendRoot);
+    const config = loadConfig({ FRAME_FIXTURE: "load-test/config.test.ts" }, frontendRoot);
 
     assert.equal(config.concurrentSessions, 2);
     assert.equal(config.durationSeconds, 10);
     assert.equal(config.framesPerSecond, 1);
     assert.equal(config.apiBaseUrl.toString(), "http://localhost:5194/");
     assert.equal(config.faultInjection.size, 0);
+});
+
+test("requires an explicit local JPEG fixture", () => {
+    assert.throws(() => loadConfig({}, frontendRoot), /FRAME_FIXTURE is required/);
 });
 
 test("rejects invalid numeric settings", () => {
@@ -24,7 +27,10 @@ test("rejects invalid numeric settings", () => {
 
 test("requires an explicit Azure opt-in", () => {
     assert.throws(
-        () => loadConfig({ API_BASE_URL: "https://load-test.azurewebsites.net" }, frontendRoot),
+        () => loadConfig({
+            API_BASE_URL: "https://load-test.azurewebsites.net",
+            FRAME_FIXTURE: "load-test/config.test.ts",
+        }, frontendRoot),
         /ALLOW_AZURE_LOAD_TEST=true/,
     );
 
@@ -32,17 +38,9 @@ test("requires an explicit Azure opt-in", () => {
         API_BASE_URL: "https://load-test.azurewebsites.net",
         ALLOW_AZURE_LOAD_TEST: "true",
         FAULT_INJECTION: "signalr-reconnect,duplicate-frame",
+        FRAME_FIXTURE: "load-test/config.test.ts",
     }, frontendRoot);
     assert.equal(isAzureHttpsEndpoint(config.apiBaseUrl), true);
     assert.deepEqual([...config.faultInjection], ["signalr-reconnect", "duplicate-frame"]);
     assert.equal(isHighLoad(config), false);
-});
-
-test("fixture is a complete independent JPEG", async () => {
-    const fixture = await readFile(resolve(frontendRoot, "load-test/fixtures/transport-test_1.jpg"));
-
-    assert.equal(fixture[0], 0xff);
-    assert.equal(fixture[1], 0xd8);
-    assert.equal(fixture.at(-2), 0xff);
-    assert.equal(fixture.at(-1), 0xd9);
 });

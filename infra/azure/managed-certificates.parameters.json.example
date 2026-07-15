@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "containerEnvironmentName": { "value": "<name-prefix>-cae" },
+    "location": { "value": "japaneast" },
+    "dnsHandoffAndUnsecuredBindingsConfirmed": { "value": false },
+    "frontendHostname": { "value": "awaver.4rnay.net" },
+    "backendHostname": { "value": "api.awaver.4rnay.net" },
+    "workerHealthHostname": { "value": "worker.api.awaver.4rnay.net" },
+    "frontendManagedCertificateName": { "value": "awaver-frontend-managed" },
+    "backendManagedCertificateName": { "value": "awaver-backend-managed" },
+    "workerManagedCertificateName": { "value": "awaver-worker-health-managed" },
+    "tags": {
+      "value": {
+        "workload": "awakeverify",
+        "environment": "nonproduction",
+        "purpose": "scheduled-demo-three-app-managed-certificates"
+      }
+    }
+  }
+}

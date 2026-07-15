@@ -336,10 +336,10 @@ export default function WorkerPipelineTestPage() {
     const canResume = runtimeState === "paused" && sessionId !== null;
 
     return (
-        <main className="min-h-screen bg-background p-6 text-foreground">
-            <div className="mx-auto flex max-w-6xl flex-col gap-6">
-                <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-                    <div>
+        <main className="min-h-screen bg-background p-4 text-foreground sm:p-6">
+            <div className="mx-auto flex min-w-0 max-w-6xl flex-col gap-6">
+                <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                    <div className="min-w-0">
                         <h1 className="text-2xl font-semibold">Worker pipeline test</h1>
                         <p className="text-sm text-muted-foreground">
                             カメラフレームを backend の HTTPS binary API へ送信し、worker 解析結果を backend のイベントストリームから表示します。
@@ -356,14 +356,14 @@ export default function WorkerPipelineTestPage() {
                 </div>
 
                 {message && (
-                    <Alert variant={runtimeState === "error" ? "destructive" : "default"}>
+                    <Alert className="min-w-0" variant={runtimeState === "error" ? "destructive" : "default"}>
                         <AlertTitle>状態</AlertTitle>
-                        <AlertDescription>{message}</AlertDescription>
+                        <AlertDescription className="break-all">{message}</AlertDescription>
                     </Alert>
                 )}
 
-                <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
-                    <Card>
+                <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
+                    <Card className="min-w-0">
                         <CardHeader>
                             <CardTitle>Camera frame</CardTitle>
                             <CardDescription>
@@ -433,8 +433,8 @@ export default function WorkerPipelineTestPage() {
                         </CardContent>
                     </Card>
 
-                    <div className="flex flex-col gap-6">
-                        <Card>
+                    <div className="flex min-w-0 flex-col gap-6">
+                        <Card className="min-w-0">
                             <CardHeader>
                                 <CardTitle>Calibration</CardTitle>
                                 <CardDescription>
@@ -482,7 +482,7 @@ export default function WorkerPipelineTestPage() {
                             </CardContent>
                         </Card>
 
-                        <Card>
+                        <Card className="min-w-0">
                             <CardHeader>
                                 <CardTitle>Latest worker result</CardTitle>
                                 <CardDescription>
@@ -523,7 +523,7 @@ export default function WorkerPipelineTestPage() {
                             </CardContent>
                         </Card>
 
-                        <Card>
+                        <Card className="min-w-0">
                             <CardHeader>
                                 <CardTitle>Recent events</CardTitle>
                                 <CardDescription>最新 {maxRecentEvents} 件の解析イベント</CardDescription>
@@ -532,11 +532,11 @@ export default function WorkerPipelineTestPage() {
                                 {recentEvents.length === 0 ? (
                                     <p className="text-sm text-muted-foreground">イベントはまだありません。</p>
                                 ) : (
-                                    <div className="flex max-h-96 flex-col gap-2 overflow-auto">
+                                    <div className="flex min-w-0 max-h-96 flex-col gap-2 overflow-auto">
                                         {recentEvents.map((event, index) => (
                                             <pre
                                                 key={`${event.type}-${index}`}
-                                                className="overflow-auto rounded-md bg-muted p-2 text-xs"
+                                                className="max-w-full min-w-0 overflow-auto rounded-md bg-muted p-2 text-xs"
                                             >
                                                 {JSON.stringify(event, null, 2)}
                                             </pre>
@@ -554,7 +554,7 @@ export default function WorkerPipelineTestPage() {
 
 function StatusItem({ label, value }: { label: string; value: string }) {
     return (
-        <div className="rounded-lg border p-3">
+        <div className="min-w-0 rounded-lg border p-3">
             <div className="text-xs text-muted-foreground">{label}</div>
             <div className="break-all font-mono text-sm">{value}</div>
         </div>
@@ -563,9 +563,9 @@ function StatusItem({ label, value }: { label: string; value: string }) {
 
 function Metric({ label, value }: { label: string; value: string }) {
     return (
-        <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm">
+        <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm">
             <span className="text-muted-foreground">{label}</span>
-            <span className="font-mono">{value}</span>
+            <span className="min-w-0 break-all font-mono">{value}</span>
         </div>
     );
 }

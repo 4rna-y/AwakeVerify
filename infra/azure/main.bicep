@@ -6,14 +6,20 @@ param namePrefix string
 @description('Azure region for all newly-created resources.')
 param location string = resourceGroup().location
 
-@description('Set false for the foundation deployment. Set true only after both public container images have been published.')
+@description('Set false for the foundation deployment. Set true only after the required public container images have been published.')
 param deployWorkloads bool = false
 
-@description('Public OCI registry host used by the Backend and Worker images.')
+@description('Deploy the independent Next.js SSR Frontend Container App. It defaults to false so existing Backend/Worker non-production load-test deployments remain compatible.')
+param deployFrontend bool = false
+
+@description('Public OCI registry host used by the Frontend, Backend, and Worker images.')
 param containerImageRegistry string = 'ghcr.io'
 
-@description('Public OCI registry namespace that owns the Backend and Worker repositories.')
+@description('Public OCI registry namespace that owns the Frontend, Backend, and Worker repositories.')
 param containerImageNamespace string = '4rna-y'
+
+@description('Frontend image repository in the public OCI registry.')
+param frontendImageRepository string = 'awaver-frontend'
 
 @description('Backend image repository in the public OCI registry.')
 param backendImageRepository string = 'awaver-backend'
@@ -21,11 +27,34 @@ param backendImageRepository string = 'awaver-backend'
 @description('Worker image repository in the public OCI registry.')
 param workerImageRepository string = 'awaver-worker'
 
-@description('Immutable image tag deployed to Backend and Worker after publication to the public OCI registry. Do not use mutable tags such as latest.')
+@description('Immutable image tag used only by the legacy non-production deployment scripts. New workflow-driven deployments should pass frontendImage, backendImage, and workerImage as complete immutable references.')
 param imageTag string = 'replace-with-immutable-tag'
 
+@description('Complete immutable Frontend OCI image reference produced by the image workflow. The default preserves the existing imageTag convention when deployFrontend is explicitly enabled.')
+param frontendImage string = '${containerImageRegistry}/${containerImageNamespace}/${frontendImageRepository}:${imageTag}'
+
+@description('Complete immutable Backend OCI image reference produced by the image workflow. The default preserves the existing non-production imageTag contract.')
+param backendImage string = '${containerImageRegistry}/${containerImageNamespace}/${backendImageRepository}:${imageTag}'
+
+@description('Complete immutable Worker OCI image reference produced by the image workflow. The default preserves the existing non-production imageTag contract.')
+param workerImage string = '${containerImageRegistry}/${containerImageNamespace}/${workerImageRepository}:${imageTag}'
+
+@minValue(0)
+@description('Minimum independent Frontend ACA replicas. Use zero between demos and warm it before scheduled demonstrations.')
+param frontendMinReplicas int = 0
+
 @minValue(1)
-@description('Minimum Backend ACA replicas. The non-production parameter file keeps two replicas warm for burst tests after ACA quota and credit approval.')
+@description('Maximum independent Frontend ACA replicas.')
+param frontendMaxReplicas int = 2
+
+@description('Container Apps CPU cores allocated to each Frontend replica.')
+param frontendCpu int = 1
+
+@description('Container Apps memory allocated to each Frontend replica.')
+param frontendMemory string = '2Gi'
+
+@minValue(0)
+@description('Minimum Backend ACA replicas. Use zero between demos; restore the validated warm profile before a scheduled demo or load test.')
 param backendMinInstances int = 1
 
 @minValue(1)
@@ -147,7 +176,41 @@ param redisCacheName string
 param managedRedisSkuName string = 'Balanced_B0'
 
 @description('Frontend origin permitted by Backend CORS, including scheme and no trailing slash.')
-param frontendOrigin string
+param frontendOrigin string = 'https://awaver.4rnay.net'
+
+@secure()
+@description('Initial administrator ID used only for first-start bootstrap. Pass it together with initialAdminPassword, then redeploy both as empty strings after bootstrap succeeds.')
+param initialAdminId string = ''
+
+@secure()
+@description('Initial administrator password used only for first-start bootstrap. It is stored as an ACA secret and is never emitted as a deployment output. Pass it together with initialAdminId, then remove both after bootstrap succeeds.')
+param initialAdminPassword string = ''
+
+@allowed([
+  'None'
+  'DnsValidated'
+  'Secured'
+])
+@description('Custom-domain deployment stage. None creates no bindings; DnsValidated adds certificate-free bindings after Cloudflare A/TXT propagation; Secured binds certificates created by managed-certificates.bicep.')
+param customDomainBindingStage string = 'None'
+
+@description('Frontend custom hostname bound only to the independent Frontend Container App.')
+param frontendHostname string = 'awaver.4rnay.net'
+
+@description('API and SignalR custom hostname bound to the Backend Container App.')
+param backendHostname string = 'api.awaver.4rnay.net'
+
+@description('Health-only custom hostname bound to the Worker Container App port 8000.')
+param workerHealthHostname string = 'worker.api.awaver.4rnay.net'
+
+@description('Managed certificate resource name for frontendHostname. The certificate is created by managed-certificates.bicep after DNS handoff.')
+param frontendManagedCertificateName string = 'awaver-frontend-managed'
+
+@description('Managed certificate resource name for backendHostname. The certificate is created by managed-certificates.bicep after DNS handoff.')
+param backendManagedCertificateName string = 'awaver-backend-managed'
+
+@description('Managed certificate resource name for workerHealthHostname. The certificate is created by managed-certificates.bicep after DNS handoff.')
+param workerManagedCertificateName string = 'awaver-worker-health-managed'
 
 @description('Microsoft Entra authority for Backend Worker bearer-token validation.')
 param workerEntraAuthority string
@@ -187,14 +250,55 @@ param tags object = {
 
 var serviceBusNamespaceName = '${namePrefix}-servicebus'
 var signalrName = '${namePrefix}-signalr'
+var frontendAppName = '${namePrefix}-frontend'
 var backendAppName = '${namePrefix}-backend'
 var containerEnvironmentName = '${namePrefix}-cae'
 var workerAppName = '${namePrefix}-worker'
 var logAnalyticsName = '${namePrefix}-logs'
 var backendApplicationInsightsName = '${namePrefix}-backend-ai'
 var backendExpectedInstanceCount = backendMaxInstances
-var backendImage = '${containerImageRegistry}/${containerImageNamespace}/${backendImageRepository}:${imageTag}'
-var workerImage = '${containerImageRegistry}/${containerImageNamespace}/${workerImageRepository}:${imageTag}'
+var bootstrapAdminConfigured = !empty(initialAdminId) && !empty(initialAdminPassword)
+var customDomainsEnabled = customDomainBindingStage != 'None'
+var securedCustomDomainsEnabled = customDomainBindingStage == 'Secured'
+var frontendManagedCertificateId = resourceId('Microsoft.App/managedEnvironments/managedCertificates', containerEnvironmentName, frontendManagedCertificateName)
+var backendManagedCertificateId = resourceId('Microsoft.App/managedEnvironments/managedCertificates', containerEnvironmentName, backendManagedCertificateName)
+var workerManagedCertificateId = resourceId('Microsoft.App/managedEnvironments/managedCertificates', containerEnvironmentName, workerManagedCertificateName)
+var frontendCustomDomains = !customDomainsEnabled ? [] : securedCustomDomainsEnabled ? [
+  {
+    name: frontendHostname
+    bindingType: 'SniEnabled'
+    certificateId: frontendManagedCertificateId
+  }
+] : [
+  {
+    name: frontendHostname
+    bindingType: 'Disabled'
+  }
+]
+var backendCustomDomains = !customDomainsEnabled ? [] : securedCustomDomainsEnabled ? [
+  {
+    name: backendHostname
+    bindingType: 'SniEnabled'
+    certificateId: backendManagedCertificateId
+  }
+] : [
+  {
+    name: backendHostname
+    bindingType: 'Disabled'
+  }
+]
+var workerCustomDomains = !customDomainsEnabled ? [] : securedCustomDomainsEnabled ? [
+  {
+    name: workerHealthHostname
+    bindingType: 'SniEnabled'
+    certificateId: workerManagedCertificateId
+  }
+] : [
+  {
+    name: workerHealthHostname
+    bindingType: 'Disabled'
+  }
+]
 
 var backendBlobSas = storage.listAccountSas('2023-05-01', {
   signedServices: 'b'
@@ -489,6 +593,105 @@ resource signalr 'Microsoft.SignalRService/SignalR@2023-02-01' = {
   }
 }
 
+resource frontendContainerApp 'Microsoft.App/containerApps@2025-01-01' = if (deployWorkloads && deployFrontend) {
+  name: frontendAppName
+  location: location
+  tags: tags
+  properties: {
+    managedEnvironmentId: containerEnvironment.id
+    configuration: {
+      activeRevisionsMode: 'Single'
+      ingress: {
+        external: true
+        targetPort: 3000
+        transport: 'http'
+        allowInsecure: false
+        traffic: [
+          {
+            latestRevision: true
+            weight: 100
+          }
+        ]
+        customDomains: frontendCustomDomains
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'frontend'
+          image: frontendImage
+          resources: {
+            cpu: frontendCpu
+            memory: frontendMemory
+          }
+          env: [
+            {
+              name: 'HOSTNAME'
+              value: '0.0.0.0'
+            }
+            {
+              name: 'PORT'
+              value: '3000'
+            }
+          ]
+          probes: [
+            {
+              type: 'Startup'
+              httpGet: {
+                path: '/'
+                port: 3000
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 1
+              periodSeconds: 5
+              timeoutSeconds: 3
+              failureThreshold: 30
+            }
+            {
+              type: 'Liveness'
+              httpGet: {
+                path: '/'
+                port: 3000
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 30
+              periodSeconds: 10
+              timeoutSeconds: 3
+              failureThreshold: 3
+            }
+            {
+              type: 'Readiness'
+              httpGet: {
+                path: '/'
+                port: 3000
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 10
+              timeoutSeconds: 3
+              failureThreshold: 3
+            }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: frontendMinReplicas
+        maxReplicas: frontendMaxReplicas
+        rules: [
+          {
+            name: 'http-concurrent-requests'
+            http: {
+              metadata: {
+                concurrentRequests: '50'
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+
 resource backendContainerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkloads) {
   name: backendAppName
   location: location
@@ -511,8 +714,9 @@ resource backendContainerApp 'Microsoft.App/containerApps@2024-03-01' = if (depl
             weight: 100
           }
         ]
+        customDomains: backendCustomDomains
       }
-      secrets: [
+      secrets: concat([
         {
           name: 'backend-application-insights'
           value: backendApplicationInsights.properties.ConnectionString
@@ -539,7 +743,16 @@ resource backendContainerApp 'Microsoft.App/containerApps@2024-03-01' = if (depl
           name: 'backend-signalr-connection'
           value: signalr.listKeys().primaryConnectionString
         }
-      ]
+      ], bootstrapAdminConfigured ? [
+        {
+          name: 'initial-admin-id'
+          value: initialAdminId
+        }
+        {
+          name: 'initial-admin-password'
+          value: initialAdminPassword
+        }
+      ] : [])
     }
     template: {
       terminationGracePeriodSeconds: backendTerminationGracePeriodSeconds
@@ -551,7 +764,7 @@ resource backendContainerApp 'Microsoft.App/containerApps@2024-03-01' = if (depl
             cpu: backendCpu
             memory: backendMemory
           }
-          env: [
+          env: concat([
             {
               name: 'ASPNETCORE_ENVIRONMENT'
               value: 'Production'
@@ -628,7 +841,16 @@ resource backendContainerApp 'Microsoft.App/containerApps@2024-03-01' = if (depl
               name: 'Cors__AllowedOrigins__0'
               value: frontendOrigin
             }
-          ]
+          ], bootstrapAdminConfigured ? [
+            {
+              name: 'ADMIN_ID'
+              secretRef: 'initial-admin-id'
+            }
+            {
+              name: 'ADMIN_PASSWORD'
+              secretRef: 'initial-admin-password'
+            }
+          ] : [])
           probes: [
             {
               type: 'Startup'
@@ -698,6 +920,19 @@ resource workerApp 'Microsoft.App/containerApps@2025-01-01' = if (deployWorkload
     managedEnvironmentId: containerEnvironment.id
     configuration: {
       activeRevisionsMode: 'Single'
+      ingress: {
+        external: true
+        targetPort: 8000
+        transport: 'http'
+        allowInsecure: false
+        traffic: [
+          {
+            latestRevision: true
+            weight: 100
+          }
+        ]
+        customDomains: workerCustomDomains
+      }
       secrets: [
         {
           name: 'worker-blob-connection'
@@ -858,9 +1093,21 @@ resource workerApp 'Microsoft.App/containerApps@2025-01-01' = if (deployWorkload
 }
 
 output containerImageRegistry string = containerImageRegistry
+output frontendImageReference string = frontendImage
 output backendImageReference string = backendImage
 output workerImageReference string = workerImage
+output containerEnvironmentName string = containerEnvironment.name
+output containerEnvironmentStaticIp string = containerEnvironment.properties.staticIp
+output frontendContainerAppName string = deployWorkloads && deployFrontend ? frontendContainerApp!.name : ''
+output frontendContainerAppFqdn string = deployWorkloads && deployFrontend ? frontendContainerApp!.properties.configuration.ingress.fqdn : ''
+output frontendCustomDomainVerificationId string = deployWorkloads && deployFrontend ? frontendContainerApp!.properties.customDomainVerificationId : ''
+output backendContainerAppName string = deployWorkloads ? backendContainerApp!.name : ''
 output backendContainerAppFqdn string = deployWorkloads ? backendContainerApp!.properties.configuration.ingress.fqdn : ''
+output backendCustomDomainVerificationId string = deployWorkloads ? backendContainerApp!.properties.customDomainVerificationId : ''
+output workerContainerAppName string = deployWorkloads ? workerApp!.name : ''
+output workerContainerAppFqdn string = deployWorkloads ? workerApp!.properties.configuration.ingress.fqdn : ''
+output workerCustomDomainVerificationId string = deployWorkloads ? workerApp!.properties.customDomainVerificationId : ''
+output customDomainBindingStage string = customDomainBindingStage
 output postgresServerHost string = '${postgres.name}.postgres.database.azure.com'
 output redisHost string = '${redis.name}.redis.cache.windows.net'
 output serviceBusNamespace string = serviceBusNamespace.name

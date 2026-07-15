@@ -240,7 +240,7 @@ export default function AdminSessionPage({ sessionId }: { sessionId: string }) {
 
     if (guardState === "checking") {
         return (
-            <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-6 p-6">
+            <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-6 p-4 md:p-6">
                 <Skeleton className="h-8 w-64" />
                 <Skeleton className="h-64 w-full" />
             </main>
@@ -249,7 +249,7 @@ export default function AdminSessionPage({ sessionId }: { sessionId: string }) {
 
     if (guardState === "forbidden") {
         return (
-            <main className="flex min-h-screen items-center justify-center p-6">
+            <main className="flex min-h-screen items-center justify-center p-4 md:p-6">
                 <Alert variant="destructive" className="w-full max-w-md">
                     <AlertTitle>権限がありません</AlertTitle>
                     <AlertDescription className="flex flex-col gap-3">
@@ -262,13 +262,13 @@ export default function AdminSessionPage({ sessionId }: { sessionId: string }) {
     }
 
     return (
-        <main className="mx-auto flex max-w-6xl flex-col gap-6 p-6">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-                <div className="flex flex-wrap items-center gap-3">
+        <main className="mx-auto flex max-w-6xl flex-col gap-6 p-4 md:p-6">
+            <div className="flex flex-col items-stretch gap-4 md:flex-row md:items-center md:justify-between">
+                <div className="flex flex-col items-stretch gap-3 md:flex-row md:flex-wrap md:items-center">
                     <Button type="button" variant="outline" onClick={() => router.push("/admin/dashboard")}>一覧へ戻る</Button>
                     <h1 className="font-heading text-xl font-medium">セッション詳細</h1>
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-col items-stretch gap-2 md:flex-row md:flex-wrap md:items-center">
                     <Badge variant={connectionState === "error" ? "destructive" : "secondary"}>通知: {connectionStateLabel(connectionState)}</Badge>
                     <Button type="button" variant="outline" onClick={() => void loadSessionDetail()}>更新</Button>
                     <Button type="button" variant="outline" onClick={() => void handleLogout()}>ログアウト</Button>
@@ -279,7 +279,7 @@ export default function AdminSessionPage({ sessionId }: { sessionId: string }) {
                 <CardHeader><CardTitle>セッション概要</CardTitle></CardHeader>
                 <CardContent>
                     {detailLoadState === "loading" && !detail ? (
-                        <div className="grid gap-2 md:grid-cols-4">
+                        <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
                             <Skeleton className="h-5 w-40" />
                             <Skeleton className="h-5 w-48" />
                             <Skeleton className="h-5 w-48" />
@@ -291,7 +291,7 @@ export default function AdminSessionPage({ sessionId }: { sessionId: string }) {
                             <AlertDescription>{detailError}</AlertDescription>
                         </Alert>
                     ) : detail ? (
-                        <div className="grid gap-3 md:grid-cols-5">
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
                             <span>動画 ID: {detail.videoId}</span>
                             <span>学籍番号: {detail.studentId}</span>
                             <span>開始: {formatDateTime(detail.startedAt)}</span>
@@ -384,7 +384,9 @@ function ScoreChart({ scores, events, calibration }: { scores: Score[]; events: 
                 </label>
                 {(showPerclos || showEar) && <span className="text-muted-foreground">{calibration ? `PERCLOS 基準: EAR < ${calibration.earThreshold.toFixed(2)}` : "キャリブレーション情報なし"}</span>}
             </div>
-            <svg className="h-auto w-full" viewBox={`0 0 ${chart.width} ${chart.height}`} role="img" aria-label="眠気スコア時系列グラフ。縦軸は値、横軸は時刻、自動停止区間を網掛けで表示しています。score、PERCLOS、EAR の線にホバーすると詳細を表示します。">
+            <div className="overflow-x-auto">
+                <div className="flex min-w-225 flex-col">
+                    <svg className="h-auto w-full" viewBox={`0 0 ${chart.width} ${chart.height}`} role="img" aria-label="眠気スコア時系列グラフ。縦軸は値、横軸は時刻、自動停止区間を網掛けで表示しています。score、PERCLOS、EAR の線にホバーまたはタップすると詳細を表示します。">
                 <g className="text-primary">
                     <rect x={chart.left} y={chart.top} width={plotWidth} height={yForValue(0.75) - chart.top} fill="currentColor" fillOpacity="0.08" />
                     <line x1={chart.left} x2={chart.left + plotWidth} y1={yForValue(0.75)} y2={yForValue(0.75)} stroke="currentColor" strokeDasharray="6 5" strokeWidth="1.5" />
@@ -400,7 +402,7 @@ function ScoreChart({ scores, events, calibration }: { scores: Score[]; events: 
                 <line x1={chart.left} x2={chart.left} y1={chart.top} y2={chart.top + plotHeight} stroke="currentColor" strokeOpacity="0.5" />
                 <line x1={chart.left} x2={chart.left + plotWidth} y1={chart.top + plotHeight} y2={chart.top + plotHeight} stroke="currentColor" strokeOpacity="0.5" />
                 {xTicks.map((tick) => <g key={tick.key}><line x1={tick.x} x2={tick.x} y1={chart.top + plotHeight} y2={chart.top + plotHeight + 5} stroke="currentColor" strokeOpacity="0.5" /><text x={tick.x} y={chart.top + plotHeight + 21} textAnchor="middle" className="fill-muted-foreground">{tick.timeLabel}</text><text x={tick.x} y={chart.top + plotHeight + 42} textAnchor="middle" className="fill-muted-foreground">{tick.videoTimeLabel}</text></g>)}
-                {visibleSeries.map((series) => <g key={series.key} className={series.className} onPointerMove={(event) => handleSeriesPointerMove(series, event)} onPointerLeave={() => setHoveredPoint(null)}><polyline fill="none" stroke="currentColor" strokeWidth="3" points={orderedScores.map((score, index) => `${xForScore(score, index)},${yForValue(series.value(score))}`).join(" ")} />{orderedScores.map((score, index) => <circle key={`${series.key}-${score.scoredAt}`} cx={xForScore(score, index)} cy={yForValue(series.value(score))} r="3" fill="currentColor" />)}<polyline fill="none" stroke="transparent" strokeWidth="16" points={orderedScores.map((score, index) => `${xForScore(score, index)},${yForValue(series.value(score))}`).join(" ")} /></g>)}
+                {visibleSeries.map((series) => <g key={series.key} className={series.className} onPointerDown={(event) => handleSeriesPointerMove(series, event)} onPointerMove={(event) => handleSeriesPointerMove(series, event)} onPointerLeave={() => setHoveredPoint(null)}><polyline fill="none" stroke="currentColor" strokeWidth="3" points={orderedScores.map((score, index) => `${xForScore(score, index)},${yForValue(series.value(score))}`).join(" ")} />{orderedScores.map((score, index) => <circle key={`${series.key}-${score.scoredAt}`} cx={xForScore(score, index)} cy={yForValue(series.value(score))} r="3" fill="currentColor" />)}<polyline fill="none" stroke="transparent" strokeWidth="16" points={orderedScores.map((score, index) => `${xForScore(score, index)},${yForValue(series.value(score))}`).join(" ")} /></g>)}
                 {hoveredScore !== null && hoveredSeries !== null && hoveredScoreX !== null && hoveredScoreY !== null && <g pointerEvents="none">
                     <line x1={hoveredScoreX} x2={hoveredScoreX} y1={chart.top} y2={chart.top + plotHeight} className="stroke-muted-foreground" strokeDasharray="4 4" strokeOpacity="0.7" />
                     <g className={hoveredSeries.className}><circle cx={hoveredScoreX} cy={hoveredScoreY} r="6" className="fill-background" stroke="currentColor" strokeWidth="3" /></g>
@@ -416,9 +418,9 @@ function ScoreChart({ scores, events, calibration }: { scores: Score[]; events: 
                 <text x="16" y={chart.top + plotHeight / 2} textAnchor="middle" transform={`rotate(-90 16 ${chart.top + plotHeight / 2})`} className="fill-muted-foreground">値</text>
                 <text x={chart.left - 8} y={chart.top + plotHeight + 21} textAnchor="end" className="fill-muted-foreground">時刻</text>
                 <text x={chart.left - 8} y={chart.top + plotHeight + 42} textAnchor="end" className="fill-muted-foreground">動画位置 (秒)</text>
-            </svg>
+                    </svg>
 
-            <svg className="h-auto w-full" viewBox={`0 0 ${chart.width} 88`} role="img" aria-label="スコアタイムライン。normal、caution、warning、danger を色で表示しています。">
+                    <svg className="h-auto w-full" viewBox={`0 0 ${chart.width} 88`} role="img" aria-label="スコアタイムライン。normal、caution、warning、danger を色で表示しています。">
                 <text x={chart.left} y="14" className="fill-muted-foreground">スコアタイムライン</text>
                 <rect x={chart.left} y="26" width={plotWidth} height="20" rx="4" className="fill-muted" />
                 {scoreIntervals.map((interval) => {
@@ -431,7 +433,9 @@ function ScoreChart({ scores, events, calibration }: { scores: Score[]; events: 
                     const x = chart.left + index * 150;
                     return <g key={level} className={style.className}><rect x={x} y="62" width="12" height="12" rx="2" fill="currentColor" /><text x={x + 18} y="72" className="fill-foreground">{style.label}</text></g>;
                 })}
-            </svg>
+                    </svg>
+                </div>
+            </div>
         </div>
     );
 }

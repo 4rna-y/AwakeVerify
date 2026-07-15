@@ -78,11 +78,11 @@ export default function StudentPage() {
         loginState !== "starting" && studentId.trim().length > 0;
 
     return (
-        <main className="relative h-screen w-screen overflow-hidden">
+        <main className="relative min-h-dvh w-full overflow-x-hidden md:h-screen md:w-screen md:overflow-hidden">
             <Dialog open>
                 <DialogContent
                     showCloseButton={false}
-                    className="w-full max-w-md"
+                    className="w-[calc(100%-2rem)] max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto md:w-full md:max-h-none md:overflow-visible"
                 >
                     <DialogHeader>
                         <DialogTitle>生徒ログイン</DialogTitle>
