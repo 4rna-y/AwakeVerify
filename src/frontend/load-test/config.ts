@@ -26,7 +26,7 @@ const defaults = {
     concurrentSessions: 2,
     durationSeconds: 10,
     framesPerSecond: 1,
-    frameFixture: "load-test/fixtures/transport-test.jpg",
+    frameFixture: "load-test/fixtures/transport-test_1.jpg",
     apiBaseUrl: "http://localhost:5194",
     allowAzureLoadTest: false,
     rampUpSeconds: 0,

@@ -17,9 +17,11 @@
 
 `main.bicep` は上記の Azure リソースと両方の Container App を作成し、public GHCR image を配置する。共有 Resource Group 内で既存リソースを変更しないよう、Resource 名は `namePrefix` によって分離する。通常設定は `nonprod.parameters.json`、実値と環境固有名は Git 管理外の secure parameter file に分離する。
 
+`frameQueueName` はSession queue名である。Service Busは既存queueの`requiresDuplicateDetection`を更新できないため、HTTP ingressへ切替える既存環境では `frame-processing-queue-http-v2` のような新しい名前を設定し、BackendとWorkerを同一デプロイで切り替える。旧queueはdrain確認後まで削除しない。
+
 ## 重要な設計
 
-- Worker は `azure-servicebus` custom scale rule を使用する。`messageCount` は `workerScaleQueueThreshold` であり、`WORKER_SESSION_CONCURRENCY` とは別の環境容量設定である。
+- Worker は `azure-servicebus` custom scale rule を使用する。`messageCount` は `workerScaleQueueThreshold` であり、`WORKER_SESSION_CONCURRENCY` とは別の環境容量設定である。今回の nonprod 検証値は 1 CPU / 2 GiB Worker、3 Session slot/replica、最低 10・最大 12 replica、20 active messages/replica とする。最低10 replica は30 Session slot、最大12 replica は36 Session slotを提供する。30 Session × 5fpsの試験は、全最低replicaが `/health/ready` になった後に開始し、frame-to-result の p95 2秒以下・p99 5秒以下を満たすことが受け入れ条件である。`20` は3 slot が取得する最大 batch（各 10 message 未満）より小さいため、継続的な backlog で早めに replica を増やす保守的な閾値である。10 秒の `workerScalingPollingIntervalSeconds` により、常時容量を超える backlog を既定の 30 秒ではなく最大 10 秒で検知する。
 - Backend と Worker の `activeRevisionsMode` は `Single`。Backend revision 更新時は旧 revision が frame / result を二重処理しないこと、Worker revision 更新時は古い scale rule で backlog を消費しないことを確認する。
 - Worker の ACA termination grace period は `workerTerminationGracePeriodSeconds`。必ず `workerShutdownTimeoutSeconds` より大きく設定する。
 - Backend は `BACKEND_EXPECTED_INSTANCE_COUNT=backendMaxInstances` として起動する。このため複数 replica 時の Azure SignalR と Redis registry の必須契約が常に有効になる。
@@ -135,9 +137,9 @@ bash infra/azure/validate.sh
 ## 負荷試験と受け入れ確認
 
 1. Backend ACA の `az containerapp show` output に external FQDN、target port `8080`、`Single` revision、HTTP scale rule があることを確認する。`/health/live` と `/health/ready` が HTTPS で成功することを確認する。
-2. `workerMinReplicas=1` に一時更新して Worker の image pull・MediaPipe model load・Backend ACA / Blob / Service Bus / Redis 接続を warm-up する。
+2. 鮮度SLOを検証する同時Session数を `N`、`WORKER_SESSION_CONCURRENCY` を `C` とし、`workerMinReplicas` を少なくとも `ceil(N / C)` に設定する。全最低Worker replicaの `/health/ready` が成功し、MediaPipe model load・Backend ACA / Blob / Service Bus / Redis 接続まで完了することを確認してから試験を開始する。
 3. **複数の異なる Session** で HTTPS binary frame を投入する。同じ Session の backlog だけでは replica 間に分散しない。高負荷は対象 URL、Session数、時間、推定コストを提示し、`ALLOW_AZURE_LOAD_TEST=true` と TTY の明示 `START` を得た場合だけ実行する。
-4. Active message、Worker / Backend ACA replica 数、最古メッセージ年齢、DLQ、Backend CPU、frame ingress と result API timeout / latency、Outbox 未配信件数と最古 Outbox 年齢を観測する。Backend のアプリ metrics は Application Insights から同じ Log Analytics workspace で確認する。replica ごとの Outbox gauge は sum ではなく max で集計する。
+4. Active message、Worker / Backend ACA replica 数、最古メッセージ年齢、DLQ、Backend CPU、frame ingress と result API timeout / latency、Outbox 未配信件数と最古 Outbox 年齢を観測する。Workerでは queue待機、Blob取得、decode/inference、結果API送信の段階別遅延を同じ試験時刻で確認する。Backend のアプリ metrics は Application Insights から同じ Log Analytics workspace で確認する。replica ごとの Outbox gauge は sum ではなく max で集計する。
 5. Backend revision 更新または scale-in 時に readiness が新規 ingress を外し、Outbox lease / retry が Feature 15 契約を満たすことを確認する。Worker scale-in / revision restart でも処理中メッセージが `complete` されずに再配送されることを確認する。
 6. `workerMaxReplicas` 到達時に backlog が残り、フレームがサイレントに消えないことを確認する。
 

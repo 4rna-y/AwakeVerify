@@ -112,7 +112,7 @@ Azure__BlobStorage__ContainerName
 ### 4.3 Azure Service Bus
 
 1. Azure Service Bus namespaceを作成する。
-2. frame queueを作成する。既定名は `frame-processing-queue`。
+2. frame queueを作成する。HTTP ingress切替では既存queueのduplicate detectionを変更できないため、既定名 `frame-processing-queue-http-v2` の新しいSession queueへBackendとWorkerを同時に切り替える。旧 `frame-processing-queue` はdrain確認後まで削除しない。
 3. **Sessionを必ず有効化**する。
 4. **duplicate detectionを必ず有効化**する。Backend は HTTP idempotency key `(sessionId, sequenceNo)` と同じ安定した Message ID を使う。history window は最大HTTP retry horizonより長くし、既定の `PT1H` をclient retry policyと別々に変更しない。
 5. 最大配送回数、lock duration、dead-letter監視、アラートを設定する。

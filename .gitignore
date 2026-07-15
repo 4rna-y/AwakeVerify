@@ -25,3 +25,4 @@ src/worker/models/*.task
 /.codex/
 
 src/frontend/load-test/fixtures/*.jpg
+src/frontend/load-test/fixtures/transport-test.jpg

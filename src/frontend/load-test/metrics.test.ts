@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Metrics } from "./metrics";
+import { frameToResultSlo, meetsFrameToResultSlo, Metrics } from "./metrics";
 
 test("summarizes counters and frame-to-result latency percentiles", () => {
     const metrics = new Metrics();
@@ -22,7 +22,8 @@ test("summarizes counters and frame-to-result latency percentiles", () => {
     assert.equal(summary.framesNotSentDueToInFlightLimit, 1);
     assert.equal(summary.acceptedFrames, 1);
     assert.equal(summary.totalDurationMs, 1234);
-    assert.deepEqual(summary.frameToResultLatencyMs, { samples: 4, p50: 20, p95: 40, max: 40 });
+    assert.deepEqual(summary.frameToResultLatencyMs, { samples: 4, p50: 20, p95: 40, p99: 40, max: 40 });
+    assert.equal(meetsFrameToResultSlo(summary.frameToResultLatencyMs), true);
 });
 
 test("uses null latency statistics when no result contains a source sequence", () => {
@@ -30,5 +31,11 @@ test("uses null latency statistics when no result contains a source sequence", (
 
     assert.equal(summary.framesOffered, 0);
     assert.equal(summary.framesNotSentDueToInFlightLimit, 0);
-    assert.deepEqual(summary.frameToResultLatencyMs, { samples: 0, p50: null, p95: null, max: null });
+    assert.deepEqual(summary.frameToResultLatencyMs, { samples: 0, p50: null, p95: null, p99: null, max: null });
+    assert.equal(meetsFrameToResultSlo(summary.frameToResultLatencyMs), false);
+});
+
+test("rejects a latency distribution that exceeds either SLO percentile", () => {
+    assert.equal(meetsFrameToResultSlo({ samples: 100, p50: 10, p95: frameToResultSlo.p95Ms + 1, p99: 100, max: 2_100 }), false);
+    assert.equal(meetsFrameToResultSlo({ samples: 100, p50: 10, p95: 100, p99: frameToResultSlo.p99Ms + 1, max: 5_100 }), false);
 });

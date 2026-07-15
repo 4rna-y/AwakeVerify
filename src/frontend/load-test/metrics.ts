@@ -19,8 +19,21 @@ export type LatencySummary = {
     samples: number;
     p50: number | null;
     p95: number | null;
+    p99: number | null;
     max: number | null;
 };
+
+export const frameToResultSlo = {
+    p95Ms: 2_000,
+    p99Ms: 5_000,
+} as const;
+
+export function meetsFrameToResultSlo(latency: LatencySummary): boolean {
+    return latency.p95 !== null
+        && latency.p99 !== null
+        && latency.p95 <= frameToResultSlo.p95Ms
+        && latency.p99 <= frameToResultSlo.p99Ms;
+}
 
 export class Metrics {
     private readonly counters = {
@@ -56,6 +69,7 @@ export class Metrics {
                 samples: samples.length,
                 p50: percentile(samples, 0.5),
                 p95: percentile(samples, 0.95),
+                p99: percentile(samples, 0.99),
                 max: samples.length === 0 ? null : samples.at(-1) ?? null,
             },
         };

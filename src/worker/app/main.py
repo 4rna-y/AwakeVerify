@@ -41,6 +41,7 @@ DEFAULT_SERVICE_BUS_SESSION_LOCK_RENEWAL_SECONDS = 300
 DEFAULT_MAX_DELIVERY_COUNT = 10
 DEFAULT_SESSION_CONCURRENCY = 1
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 30.0
+DEFAULT_STAGE_METRICS_INTERVAL_SECONDS = 10.0
 SCORE_AGGREGATION_FRAMES = 5
 _FRAME_BLOB_PATH = re.compile(r"^sessions/([^/]+)/frames/(\d+)\.bin$")
 
@@ -130,6 +131,7 @@ class WorkerSlot:
     calibration_loader: CalibrationLoader | None
     poll_interval_seconds: float
     max_delivery_count: int
+    stage_metrics: WorkerStageMetrics | None = None
     states: dict[str, SessionAnalysisState] = field(default_factory=dict)
 
 
@@ -139,6 +141,7 @@ class FrameEnvelope:
     payload: bytes | None
     payload_error: Exception | None = None
     delivery_count: int = 1
+    blob_download_duration_ms: float | None = None
 
 
 @dataclass(frozen=True)
@@ -174,6 +177,50 @@ class DependencyCheckResult:
     name: str
     reachable: bool
     detail: str
+
+
+class WorkerStageMetrics:
+    """Emit fixed-name, payload-free p95 stage timings at a bounded interval."""
+
+    def __init__(self, interval_seconds: float = DEFAULT_STAGE_METRICS_INTERVAL_SECONDS) -> None:
+        self._interval_seconds = interval_seconds
+        self._lock = threading.Lock()
+        self._started_at = time.monotonic()
+        self._samples: dict[str, list[float]] = {
+            "queue_wait": [],
+            "blob_download": [],
+            "decode": [],
+            "inference": [],
+            "result_publish": [],
+        }
+
+    def record(self, **durations_ms: float | None) -> None:
+        now = time.monotonic()
+        with self._lock:
+            for stage, duration_ms in durations_ms.items():
+                if stage in self._samples and duration_ms is not None and math.isfinite(duration_ms) and duration_ms >= 0:
+                    self._samples[stage].append(duration_ms)
+            if now - self._started_at < self._interval_seconds:
+                return
+            samples = self._samples
+            self._samples = {stage: [] for stage in samples}
+            self._started_at = now
+
+        frame_count = len(samples["queue_wait"])
+        if frame_count == 0:
+            return
+        summary = " ".join(
+            f"{stage}_p95_ms={_percentile(samples[stage], 0.95):.1f}"
+            for stage in ("queue_wait", "blob_download", "decode", "inference", "result_publish")
+            if samples[stage]
+        )
+        logger.info("Worker stage latency snapshot: frames=%s %s", frame_count, summary)
+
+
+def _percentile(samples: list[float], quantile: float) -> float:
+    ordered = sorted(samples)
+    index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * quantile) - 1))
+    return ordered[index]
 
 
 class FrameAnalyzer(Protocol):
@@ -276,6 +323,7 @@ class AzureServiceBusFrameSource:
                 continue
 
             try:
+                blob_download_started_at = time.monotonic()
                 blob_client = self._container_client.get_blob_client(reference.blob_path)
                 payload = cast(bytes, blob_client.download_blob().readall())
                 payload_error: Exception | None = None
@@ -289,6 +337,7 @@ class AzureServiceBusFrameSource:
                     payload=payload,
                     payload_error=payload_error,
                     delivery_count=int(getattr(message, "delivery_count", 1) or 1),
+                    blob_download_duration_ms=(time.monotonic() - blob_download_started_at) * 1000,
                     message=message,
                 )
             )
@@ -492,7 +541,8 @@ def main() -> int:
     check_startup_dependencies(config)
     stop_event.clear()
     install_signal_handlers()
-    health_server = start_health_server(config.health_host, config.health_port)
+    ready_event = threading.Event()
+    health_server = start_health_server(config.health_host, config.health_port, readiness_event=ready_event)
 
     logger.info("Starting worker")
     logger.info("Model path: %s", config.model_path)
@@ -505,8 +555,10 @@ def main() -> int:
             slot_factory=lambda slot_index: create_worker_slot(config, slot_index),
             shutdown_event=stop_event,
             shutdown_timeout_seconds=config.shutdown_timeout_seconds,
+            on_ready=ready_event.set,
         )
     finally:
+        ready_event.clear()
         if health_server is not None:
             health_server.shutdown()
             health_server.server_close()
@@ -546,6 +598,7 @@ def create_worker_slot(config: WorkerConfig, slot_index: int) -> WorkerSlot:
         calibration_loader=publisher,
         poll_interval_seconds=config.poll_interval_seconds,
         max_delivery_count=config.max_delivery_count,
+        stage_metrics=WorkerStageMetrics(),
     )
 
 
@@ -555,6 +608,7 @@ def run_worker_slots(
     slot_factory: Callable[[int], WorkerSlot],
     shutdown_event: threading.Event,
     shutdown_timeout_seconds: float,
+    on_ready: Callable[[], None] | None = None,
 ) -> None:
     """Run independent Session slots until shutdown, with a bounded shutdown wait."""
     if session_concurrency <= 0:
@@ -579,6 +633,8 @@ def run_worker_slots(
     ]
     for thread in threads:
         thread.start()
+    if on_ready is not None:
+        on_ready()
 
     try:
         while any(thread.is_alive() for thread in threads) and not shutdown_event.is_set():
@@ -618,6 +674,7 @@ def run_worker_slot(
             perclos_window=slot.perclos_window,
             processed_frames=slot.processed_frames,
             calibration_loader=slot.calibration_loader,
+            stage_metrics=slot.stage_metrics,
             states=slot.states,
             poll_interval_seconds=poll_interval_seconds,
             max_delivery_count=max_delivery_count,
@@ -651,6 +708,7 @@ def run_worker_loop(
     perclos_window: RedisPerclosWindow,
     processed_frames: RedisProcessedFrameStore | None = None,
     calibration_loader: CalibrationLoader | None = None,
+    stage_metrics: WorkerStageMetrics | None = None,
     states: dict[str, SessionAnalysisState],
     poll_interval_seconds: float,
     max_delivery_count: int = DEFAULT_MAX_DELIVERY_COUNT,
@@ -686,6 +744,7 @@ def run_worker_loop(
                     publisher=publisher,
                     perclos_window=perclos_window,
                     processed_frames=processed_frames,
+                    stage_metrics=stage_metrics,
                     states=states,
                 )
                 source.complete(envelope)
@@ -773,6 +832,7 @@ def process_frame(
     perclos_window: RedisPerclosWindow,
     states: dict[str, SessionAnalysisState],
     processed_frames: RedisProcessedFrameStore | None = None,
+    stage_metrics: WorkerStageMetrics | None = None,
 ) -> None:
     reference = envelope.reference
     state = states.setdefault(reference.session_id, SessionAnalysisState())
@@ -795,12 +855,14 @@ def process_frame(
     if envelope.payload is None:
         raise RetryableProcessingError("frame blob payload is unavailable")
 
+    decode_started_at = time.monotonic()
     try:
         decoded = decoder.decode(reference, envelope.payload)
     except UnsupportedCodecError as error:
         raise UnsupportedCodecProcessingError(str(error)) from error
     except FrameDecodeError as error:
         raise InvalidFramePayloadError(str(error)) from error
+    decode_duration_ms = (time.monotonic() - decode_started_at) * 1000
 
 
 
@@ -808,7 +870,9 @@ def process_frame(
         _ = state.calibration.start()
         state.score_samples.clear()
 
+    inference_started_at = time.monotonic()
     metrics = analyzer.analyze(decoded.image)
+    inference_duration_ms = (time.monotonic() - inference_started_at) * 1000
     logger.info(
         "Analyzed image frame: session=%s sequence=%s face_detected=%s ear=%s pitch_deg=%s yaw_deg=%s",
         reference.session_id,
@@ -842,10 +906,23 @@ def process_frame(
 
     if results:
         state.pending_results[reference.sequence_no] = results
+        publish_started_at = time.monotonic()
         _publish_pending_results(publisher, reference.session_id, state, reference.sequence_no)
+        publish_duration_ms: float | None = (time.monotonic() - publish_started_at) * 1000
+    else:
+        publish_duration_ms = None
     if processed_frames is not None:
         _ = processed_frames.mark_processed(session_id=reference.session_id, sequence_no=reference.sequence_no)
     state.mark_completed(reference.sequence_no)
+    if stage_metrics is not None:
+        queue_wait_ms = max(0.0, (datetime.now(UTC) - reference.received_at).total_seconds() * 1000)
+        stage_metrics.record(
+            queue_wait=queue_wait_ms,
+            blob_download=envelope.blob_download_duration_ms,
+            decode=decode_duration_ms,
+            inference=inference_duration_ms,
+            result_publish=publish_duration_ms,
+        )
 
 
 def restore_calibration(state: SessionAnalysisState, payload: dict[str, object] | None) -> None:
@@ -1390,7 +1467,12 @@ def install_signal_handlers() -> None:
     _ = signal.signal(signal.SIGTERM, handle_signal)
 
 
-def start_health_server(host: str, port: int) -> ThreadingHTTPServer | None:
+def start_health_server(
+    host: str,
+    port: int,
+    *,
+    readiness_event: threading.Event | None = None,
+) -> ThreadingHTTPServer | None:
     if port == 0:
         return None
 
@@ -1403,10 +1485,19 @@ def start_health_server(host: str, port: int) -> ThreadingHTTPServer | None:
             self.end_headers()
 
         def do_GET(self) -> None:
-            if self.path != "/health":
+            if self.path not in {"/health", "/health/live", "/health/ready"}:
                 self.send_response(404)
                 self.send_cors_headers()
                 self.end_headers()
+                return
+            if self.path == "/health/ready" and readiness_event is not None and not readiness_event.is_set():
+                body = b'{"status":"starting"}\n'
+                self.send_response(503)
+                self.send_cors_headers()
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                _ = self.wfile.write(body)
                 return
             body = b'{"status":"ok"}\n'
             self.send_response(200)

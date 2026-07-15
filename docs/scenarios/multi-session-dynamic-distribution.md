@@ -24,6 +24,7 @@
 - 各受講者は異なる有効な `sessionId` と、その Session に束縛された有効な `student_session` を持つ。
 - Backend は Blob Storage と Service Bus Session 有効 queue に接続できる。
 - Worker は Blob Storage、Service Bus、Redis、Backend 解析結果 API に接続できる。
+- Worker の `/health/ready` は、全Session slotのMediaPipe model、Service Bus、Blob、Redis、Backend結果送信の初期化が完了するまで成功しない。
 - Azure 本番で複数 Backend instance を使用する場合、Azure SignalR Service と共有接続 registry が設定済みである。
 - Worker の Session 並列度、Worker min/max replica、queue scale threshold、Outbox batch/poll/lease、Blob 保持期間は、[`15-elastic-session-frame-processing.md`](../features/15-elastic-session-frame-processing.md) の設定契約を満たす環境設定と IaC により与えられている。
 - 各Sessionは、Feature 03の `POST /api/sessions/{sessionId}/frames/{sequenceNo}` へ、認証CookieとCSRF headerを伴う単独でデコード可能な `image/jpeg` binary bodyを送信できる。metadata、size制限、status、冪等性および再送はFeature 03を正とする。Sessionごとに最大1 requestをin-flightにし、capture tickでskipしたsequenceの欠番を許容する。キャリブレーション、眠気判定式、認証・認可は既存Featureのままとする。
@@ -60,6 +61,7 @@
 - Worker からの再送、Outbox の crash 境界による再試行でも、解析結果は既存の冪等キーにより重複保存されない。通知は at-least-once のため重複受信を許容する。
 - Backend 接続 instance と Outbox 処理 instance が異なっても、対象 Session の認可済み接続へ通知が届く。
 - 設定済みの最大 replica に達した場合、未処理フレームは backlog として残り、最古メッセージ年齢、Outbox 年齢、上限到達状況を監視できる。
+- 鮮度SLOを検証する開始burstでは、試験開始前に実Readyの最小Worker slot数が対象Session数以上である。30 Session・5fpsの受け入れ試験では、3 slot/replicaの場合に少なくとも10 replicaをreadyにし、HTTP frame送信開始から対応するSignalR解析通知受信までがp95 2秒以下、p99 5秒以下である。autoscaleで後から起動したreplicaはこの開始容量に数えない。
 
 ## 7. 例外・分岐
 

@@ -73,6 +73,8 @@ shouldPause == true
 
 `Badge` の見た目は shadcn/ui 標準の `variant` を使用し、独自色は定義しない。
 
+受講ページHeaderのBadge群は、ポインティングデバイスではホバーまたはキーボードフォーカス中に直近のscoreとlevelを追加表示する。タッチ端末では同じBadge群のタップで詳細を表示／非表示に切り替える。詳細表示の切替は動画の自動停止・再開条件を変更せず、Header/Footerの無操作タイマーをリセットする操作として扱う。
+
 ## 10. 関連機能
 
 - `09-realtime-notification.md`

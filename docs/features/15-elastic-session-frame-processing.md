@@ -66,6 +66,7 @@ Backend、Worker、Outbox、SignalR配信を、受講セッション単位で弾
 ## 7. スケール、保持期間、監視
 
 - Worker autoscale の主要トリガーは Service Bus の backlog とする。Session 有効 queue の Active message 数、処理中 Session slot 数、最大 replica 到達状況を可視化する。
+- 鮮度SLOを伴う同時Session開始では、autoscale後に増えるslotを開始時容量として数えてはならない。対象の開始burstを `N` Session、replica内並列度を `C` とすると、SLOを保証する環境は、Workerの実Ready済み最小replica数を少なくとも `ceil(N / C)` とし、`N` 個のSession slotがmodel・依存サービス接続まで完了していることを確認してから受講または負荷試験を開始する。queue backlogによるscale-outは、この常時容量を超えた場合の余力であり、開始burstの遅延を正当化しない。
 - 最古の未処理メッセージ年齢は、リアルタイム性の SLO/アラート指標とする。backlog 件数だけで遅延を判断しない。
 - 最大 Worker replica 数は環境設定と Azure クォータで制御する。上限到達時もフレームをサイレントに破棄せず、backlog、最古メッセージ年齢、dead-letter を可視化・通知する。
 - Backend の replica 数も環境設定と Azure クォータで制御する。複数 instance へ拡張する際は、共有接続 registry と Azure SignalR Service を同時に満たす。
@@ -101,6 +102,7 @@ Backend、Worker、Outbox、SignalR配信を、受講セッション単位で弾
 - 複数 dispatcher は同一 Outbox レコードを安全に claim し、送信や registry 障害では配信済みにしない。crash 境界での重複配信は許容する。
 - autoscale は backlog を主に利用し、最古メッセージ年齢と Outbox 年齢を監視する。最大 replica 到達時もフレームをサイレントに失わない。
 - Azure 本番の複数 Backend 構成では Azure SignalR Service を使用し、接続 registry をプロセス内メモリだけに置かない。
+- 鮮度SLOを受け入れる負荷試験は、開始前に全最小Worker replicaの `/health/ready` が成功し、`minReplicas × WORKER_SESSION_CONCURRENCY` が試験の同時Session数以上であることを確認する。HTTP frame送信開始からSignalR解析通知受信までの p95/p99 は Feature 08 の上限を満たさなければならない。
 
 ## 10. 関連機能・シナリオ
 

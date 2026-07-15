@@ -39,7 +39,7 @@ test("requires an explicit Azure opt-in", () => {
 });
 
 test("fixture is a complete independent JPEG", async () => {
-    const fixture = await readFile(resolve(frontendRoot, "load-test/fixtures/transport-test.jpg"));
+    const fixture = await readFile(resolve(frontendRoot, "load-test/fixtures/transport-test_1.jpg"));
 
     assert.equal(fixture[0], 0xff);
     assert.equal(fixture[1], 0xd8);

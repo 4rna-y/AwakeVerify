@@ -22,7 +22,7 @@ Backend、Worker、PostgreSQL、Redis、Azurite、Service Bus Emulator を起動
 | `CONCURRENT_SESSIONS` | `2` | 同時に作る独立受講 Session 数。正の整数。 |
 | `DURATION_SECONDS` | `10` | 各仮想 Session の送信時間。正の整数。 |
 | `FRAMES_PER_SECOND` | `1` | Session ごとの capture / offered fps。有限の正数。 |
-| `FRAME_FIXTURE` | `load-test/fixtures/transport-test.jpg` | 単独デコード可能な JPEG fixture。 |
+| `FRAME_FIXTURE` | `load-test/fixtures/transport-test.jpg` | 単独デコード可能な 640×480 JPEG fixture。既定fixtureは合成画像であり、transport/decode・顔未検出通知経路の負荷用である。 |
 | `API_BASE_URL` | `http://localhost:5194` | Backend の HTTP(S) base URL。Worker を指定してはならない。 |
 | `ALLOW_AZURE_LOAD_TEST` | `false` | Azure HTTPS endpoint 実行に必要な明示 opt-in。 |
 | `RAMP_UP_SECONDS` | `0` | 最初と最後の Session 作成の間隔合計。0 以上の整数。 |
@@ -45,11 +45,13 @@ Session ごとに最大 1 HTTP request だけを in-flight にします。次の
 
 `skip-sequence` は後続の独立 JPEG が欠番後も受理・処理可能であることを確認します。`duplicate-frame` は同一 bytes / metadata で同じ route を再 POST して冪等性を確認します。`signalr-reconnect` は解析通知の再接続と `JoinSession` の復元を確認します。
 
+既定fixtureは利用許諾済みの顔画像ではないため、顔ランドマーク検出成功時の推論能力を保証するものではありません。実カメラ相当の顔検出・PERCLOS性能を受け入れる試験では、利用許諾済みで単独デコード可能なカメラ画像を `FRAME_FIXTURE` に明示指定し、同じ SLO 判定を実行します。
+
 ## 測定値と判定
 
-`summary` は `framesOffered`、`framesSent`、`framesNotSentDueToInFlightLimit`、`acceptedFrames`、`retryableRejections`、`permanentRejections`、`retransmissions`、SignalR 再接続、解析結果、誤配送、timeout、frame-to-result latency を記録します。`framesSent` には retry と duplicate injection による HTTP POST を含みます。
+`summary` は `framesOffered`、`framesSent`、`framesNotSentDueToInFlightLimit`、`acceptedFrames`、`retryableRejections`、`permanentRejections`、`retransmissions`、SignalR 再接続、解析結果、誤配送、timeout、frame-to-result latency を記録します。`frameToResultLatencyMs` は HTTP frame送信開始から対応するSignalR解析通知受信までの end-to-end 値で、`p50`、`p95`、`p99`、最大値を出力します。`framesSent` には retry と duplicate injection による HTTP POST を含みます。
 
-`assertions` は、Session 誤配送がないこと、同一 Session の accepted sequence が後退しないこと、指定した複数 Session が作成されたことを出力します。Worker replica / Session slot 分散、Service Bus backlog、Outbox age、ACA replica 数は CLI から直接取得せず、検証環境のメトリクスと実行時刻を照合してください。
+`assertions` は、Session 誤配送がないこと、同一 Session の accepted sequence が後退しないこと、指定した複数 Session が作成されたこと、frame-to-result の `p95 ≤ 2秒` かつ `p99 ≤ 5秒` を出力します。いずれかが偽、または標本がない場合、CLI は失敗終了します。Worker replica / Session slot 分散、Service Bus backlog、Outbox age、ACA replica 数は CLI から直接取得せず、検証環境のメトリクスと実行時刻を照合してください。
 
 ## CLI 自体のテスト
 

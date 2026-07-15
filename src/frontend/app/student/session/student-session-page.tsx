@@ -105,6 +105,8 @@ type AnalysisEvent =
     | TrackingStatusEvent
     | CalibrationStatusEvent;
 
+const MAX_AUTOMATIC_CONTROL_EVENT_AGE_MS = 5_000;
+
 type PersistedCalibration = Extract<
     CalibrationStatusEvent,
     { status: "succeeded" }
@@ -537,6 +539,7 @@ export default function StudentSessionPage() {
 
         const connection = new signalR.HubConnectionBuilder()
             .withUrl(buildAnalysisEventsHubUrl(), { withCredentials: true })
+            .configureLogging(signalR.LogLevel.None)
             .withAutomaticReconnect()
             .build();
         resultConnectionRef.current = connection;
@@ -700,6 +703,10 @@ export default function StudentSessionPage() {
     function handleTrackingStatus(event: TrackingStatusEvent) {
         setLatestTracking(event);
 
+        if (!isFreshAutomaticControlEvent(event.detectedAt)) {
+            return;
+        }
+
         if (event.status !== "face_not_detected") {
             return;
         }
@@ -741,6 +748,10 @@ export default function StudentSessionPage() {
     function handleDrowsinessScore(event: DrowsinessScoreEvent) {
         setLatestScore(event);
         setLatestTracking(null);
+
+        if (!isFreshAutomaticControlEvent(event.scoredAt)) {
+            return;
+        }
 
         if (shouldAutoPause(event)) {
             if (isPlayingRef.current) {
@@ -1954,6 +1965,11 @@ function parseAnalysisEvent(value: unknown): AnalysisEvent | null {
 
 function shouldAutoPause(score: DrowsinessScoreEvent) {
     return score.shouldPause || score.level === "danger" || score.score >= 0.75;
+}
+
+function isFreshAutomaticControlEvent(timestamp: string, nowMs = Date.now()) {
+    const eventMs = Date.parse(timestamp);
+    return Number.isFinite(eventMs) && eventMs <= nowMs && nowMs - eventMs <= MAX_AUTOMATIC_CONTROL_EVENT_AGE_MS;
 }
 
 

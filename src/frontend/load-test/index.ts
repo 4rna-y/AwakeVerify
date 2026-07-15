@@ -5,13 +5,15 @@ import { stdin as input, stdout as output } from "node:process";
 import { randomUUID } from "node:crypto";
 import * as signalR from "@microsoft/signalr";
 import { type FaultInjection, isAzureHttpsEndpoint, isHighLoad, loadConfig, type LoadTestConfig } from "./config";
-import { Metrics, type Summary } from "./metrics";
+import { meetsFrameToResultSlo, Metrics, type Summary } from "./metrics";
 
 type AnalysisEvent = { sessionId?: unknown; sourceSequenceNo?: unknown };
 type RunAssertions = {
     sessionIsolation: boolean;
     sameSessionAcceptanceOrder: boolean;
     parallelSessionsActivated: boolean;
+    noTimeouts: boolean;
+    frameToResultLatencySlo: boolean;
 };
 type Report = {
     schemaVersion: 2;
@@ -126,6 +128,7 @@ class VirtualSession {
                 headers: { Cookie: this.cookieJar.header() },
                 transport: signalR.HttpTransportType.WebSockets,
             })
+            .configureLogging(signalR.LogLevel.None)
             .withAutomaticReconnect([0, 500, 1_000, 2_000])
             .build();
         this.connection = connection;
@@ -255,10 +258,13 @@ async function main(): Promise<void> {
     const sessions = Array.from({ length: config.concurrentSessions }, () => new VirtualSession(config, fixture, metrics));
     const rampIntervalMs = config.concurrentSessions > 1 ? (config.rampUpSeconds * 1000) / (config.concurrentSessions - 1) : 0;
     const results = await Promise.allSettled(sessions.map((session, index) => session.run(Math.round(index * rampIntervalMs))));
+    const summary = metrics.summarize(Date.now() - startedAt);
     const assertions: RunAssertions = {
-        sessionIsolation: metrics.summarize(0).crossSessionDeliveries === 0,
+        sessionIsolation: summary.crossSessionDeliveries === 0,
         sameSessionAcceptanceOrder: sessions.every((session) => session.acceptanceOrderIsValid),
-        parallelSessionsActivated: config.concurrentSessions < 2 || metrics.summarize(0).sessionsCreated >= 2,
+        parallelSessionsActivated: config.concurrentSessions < 2 || summary.sessionsCreated >= 2,
+        noTimeouts: summary.timeouts === 0,
+        frameToResultLatencySlo: meetsFrameToResultSlo(summary.frameToResultLatencyMs),
     };
     const report: Report = {
         schemaVersion: 2,
@@ -272,7 +278,7 @@ async function main(): Promise<void> {
             resultTimeoutSeconds: config.resultTimeoutSeconds,
             faultInjection: [...config.faultInjection],
         },
-        summary: metrics.summarize(Date.now() - startedAt),
+        summary,
         assertions,
     };
     await mkdir(dirname(config.outputPath), { recursive: true });
@@ -280,7 +286,7 @@ async function main(): Promise<void> {
 
     // No target URL, principal, cookie, token, student ID, session ID, or frame content is emitted.
     output.write(`${JSON.stringify(report.summary)}\n`);
-    if (results.some((result) => result.status === "rejected") || !assertions.sessionIsolation || !assertions.sameSessionAcceptanceOrder) {
+    if (results.some((result) => result.status === "rejected") || Object.values(assertions).some((assertion) => !assertion)) {
         process.exitCode = 1;
     }
 }

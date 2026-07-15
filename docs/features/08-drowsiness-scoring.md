@@ -88,6 +88,14 @@ score >= 0.75
 
 この場合、SignalR通知の `shouldPause` を `true` とする。
 
+### 9.1 自動停止通知の鮮度契約
+
+15秒PERCLOS窓は判定に必要な観測時間であり、解析基盤の遅延許容値ではない。`drowsiness_score` と `tracking_status` の自動動画制御に使う通知は、判定に使った末尾frame時刻（それぞれ `scoredAt`、`detectedAt`）からフロントエンド受信までを測定し、`p95` を2秒以下、`p99` を5秒以下とする。通知payloadはこの時刻を必須で保持する。
+
+この契約は負荷テストの受け入れ条件でもある。少なくとも対象同時Session数・送信時間・fpsで、HTTP frame送信開始から対応するSignalR解析通知受信までの end-to-end 値（通知時刻だけを起点とする上記測定より広い範囲）も `p95` 2秒以下、`p99` 5秒以下でなければならない。Load-test CLI はこの値を `frameToResultLatencyMs` として記録し、いずれかを超過または標本がない場合は失敗終了する。timeout、Session誤配送、同一Sessionの受理順序違反も同様に不合格とする。
+
+フロントエンドは受信時点でこの時刻が5秒を超えて古い通知を、保存済み結果の表示・再取得には利用してよいが、動画の自動停止・再開可否の状態遷移には利用してはならない。これにより、遅延した過去の判定で受講中の動画を制御しない。
+
 ## 10. 顔未検出時の扱い
 
 顔未検出フレームはPERCLOS計算に含めない。
@@ -127,7 +135,7 @@ drowsiness_scores
 - unique (session_id, scored_at)
 ```
 
-同じ `sessionId` と `sourceSequenceNo` の再送は `videoTimeSec` を含む既存値と等しい場合だけ冪等成功とし、異なる値は競合として受理しない。Backendは保存済みスコアをダッシュボードREST APIの唯一の参照元とする。OutboxディスパッチャーがSignalR/SSE配信に失敗した場合は指数バックオフで再試行し、保存済みスコアを失わない。
+同じ `sessionId` と `sourceSequenceNo` の再送は `videoTimeSec` を含む既存値と等しい場合だけ冪等成功とし、異なる値は競合として受理しない。Backendは保存済みスコアをダッシュボードREST APIの唯一の参照元とする。OutboxディスパッチャーがSignalR/SSE配信に失敗した場合は指数バックオフで再試行し、保存済みスコアを失わない。再試行で鮮度上限を超えた通知も保存・配信は継続するが、Feature 09 / 10の動画制御対象にはしない。
 
 ## 12. 解析結果の受理境界
 

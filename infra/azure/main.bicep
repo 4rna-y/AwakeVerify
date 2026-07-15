@@ -53,6 +53,10 @@ param workerMinReplicas int = 0
 param workerMaxReplicas int = 3
 
 @minValue(1)
+@description('Seconds between KEDA checks of the Worker Service Bus backlog.')
+param workerScalingPollingIntervalSeconds int = 30
+
+@minValue(1)
 @description('Service Bus active-message target per Worker replica.')
 param workerScaleQueueThreshold int = 10
 
@@ -86,6 +90,9 @@ param serviceBusLockDuration string = 'PT1M'
 
 @description('ISO 8601 Service Bus duplicate-detection history window. It must cover the maximum HTTP frame retry horizon for a stable (sessionId, sequenceNo) message ID.')
 param serviceBusDuplicateDetectionHistoryTimeWindow string = 'PT1H'
+
+@description('Session-enabled frame queue name. Use a new name when immutable queue capabilities, such as duplicate detection, must change.')
+param frameQueueName string = 'frame-processing-queue-http-v2'
 
 @description('Globally unique Storage account name for frame and video containers.')
 @minLength(3)
@@ -344,7 +351,7 @@ resource serviceBusNamespace 'Microsoft.ServiceBus/namespaces@2022-10-01-preview
 
 resource frameQueue 'Microsoft.ServiceBus/namespaces/queues@2022-10-01-preview' = {
   parent: serviceBusNamespace
-  name: 'frame-processing-queue'
+  name: frameQueueName
   properties: {
     requiresSession: true
     requiresDuplicateDetection: true
@@ -680,7 +687,7 @@ resource backendContainerApp 'Microsoft.App/containerApps@2024-03-01' = if (depl
   }
 }
 
-resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkloads) {
+resource workerApp 'Microsoft.App/containerApps@2025-01-01' = if (deployWorkloads) {
   name: workerAppName
   location: location
   identity: {
@@ -786,7 +793,7 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkload
             {
               type: 'Startup'
               httpGet: {
-                path: '/health'
+                path: '/health/live'
                 port: 8000
                 scheme: 'HTTP'
               }
@@ -798,7 +805,7 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkload
             {
               type: 'Liveness'
               httpGet: {
-                path: '/health'
+                path: '/health/live'
                 port: 8000
                 scheme: 'HTTP'
               }
@@ -807,12 +814,25 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployWorkload
               timeoutSeconds: 3
               failureThreshold: 3
             }
+            {
+              type: 'Readiness'
+              httpGet: {
+                path: '/health/ready'
+                port: 8000
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 1
+              periodSeconds: 5
+              timeoutSeconds: 3
+              failureThreshold: 20
+            }
           ]
         }
       ]
       scale: {
         minReplicas: workerMinReplicas
         maxReplicas: workerMaxReplicas
+        pollingInterval: workerScalingPollingIntervalSeconds
         rules: [
           {
             name: 'servicebus-active-message-backlog'

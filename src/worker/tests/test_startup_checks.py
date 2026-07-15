@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import cast, override
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from app.main import (
     WorkerConfig,
+    WorkerStageMetrics,
     check_backend_dependency,
     create_redis_client,
     check_service_bus_dependency,
@@ -235,6 +237,39 @@ class StartupChecksTests(TestCase):
             if server is not None:
                 server.shutdown()
                 server.server_close()
+
+    def test_worker_readiness_stays_unavailable_until_slots_are_initialized(self) -> None:
+        port = find_free_port()
+        ready = threading.Event()
+        server = start_health_server("127.0.0.1", port, readiness_event=ready)
+        self.assertIsNotNone(server)
+        try:
+            with self.assertRaises(HTTPError) as unavailable:
+                _ = urlopen(f"http://127.0.0.1:{port}/health/ready", timeout=1)
+            self.assertEqual(unavailable.exception.code, 503)
+
+            ready.set()
+            with cast(HTTPResponse, urlopen(f"http://127.0.0.1:{port}/health/ready", timeout=1)) as response:
+                self.assertEqual(response.status, 200)
+            with cast(HTTPResponse, urlopen(f"http://127.0.0.1:{port}/health/live", timeout=1)) as response:
+                self.assertEqual(response.status, 200)
+        finally:
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+
+    def test_worker_stage_metrics_emit_only_fixed_aggregate_fields(self) -> None:
+        metrics = WorkerStageMetrics(interval_seconds=0)
+        with patch("app.main.logger") as logger:
+            metrics.record(queue_wait=10, blob_download=5, decode=4, inference=20, result_publish=3)
+
+        logger.info.assert_called_once()
+        message, frame_count, summary = logger.info.call_args.args
+        self.assertEqual(message, "Worker stage latency snapshot: frames=%s %s")
+        self.assertEqual(frame_count, 1)
+        self.assertIn("queue_wait_p95_ms=10.0", summary)
+        self.assertIn("blob_download_p95_ms=5.0", summary)
+        self.assertNotIn("session", summary)
 
     def test_azure_frame_source_requires_all_connection_settings(self) -> None:
         config = WorkerConfig(
