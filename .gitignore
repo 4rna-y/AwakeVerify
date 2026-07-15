@@ -23,3 +23,5 @@ src/worker/models/*.task
 
 /.claude/
 /.codex/
+
+src/frontend/load-test/fixtures/*.jpg
