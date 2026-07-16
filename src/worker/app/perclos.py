@@ -409,6 +409,11 @@ class RedisScoreAggregationWindow:
         if not isinstance(text, str):
             raise RedisScoreAggregationError("unexpected score aggregation Lua response")
         decoded = cast(object, json.loads(text))
+        # Redis Lua cjson encodes an empty table as `{}` rather than `[]`.
+        # `pending` is semantically an array, but an empty response means that
+        # no completed score window is awaiting publication.
+        if decoded == {}:
+            return ()
         if not isinstance(decoded, list):
             raise RedisScoreAggregationError("score aggregation pending state must be an array")
 
