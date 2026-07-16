@@ -6,8 +6,15 @@ import { randomUUID } from "node:crypto";
 import * as signalR from "@microsoft/signalr";
 import { type FaultInjection, isAzureHttpsEndpoint, isHighLoad, loadConfig, type LoadTestConfig } from "./config";
 import { meetsFrameToResultSlo, Metrics, type Summary } from "./metrics";
+import { ScoreWindowTracker } from "./score-window-tracker";
 
-type AnalysisEvent = { sessionId?: unknown; sourceSequenceNo?: unknown };
+type AnalysisEvent = {
+    type?: unknown;
+    status?: unknown;
+    sessionId?: unknown;
+    sourceSequenceNo?: unknown;
+    scoredAt?: unknown;
+};
 type RunAssertions = {
     sessionIsolation: boolean;
     sameSessionAcceptanceOrder: boolean;
@@ -54,7 +61,7 @@ class CookieJar {
 
 class VirtualSession {
     private readonly cookieJar = new CookieJar();
-    private readonly sentAtBySequence = new Map<number, number>();
+    private readonly scoreWindows = new ScoreWindowTracker();
     private sessionId = "";
     private csrfToken = "";
     private connection: signalR.HubConnection | undefined;
@@ -93,9 +100,8 @@ class VirtualSession {
             }
 
             await delay(this.config.resultTimeoutSeconds * 1000);
-            for (const sequenceNo of this.sentAtBySequence.keys()) {
+            for (let count = this.scoreWindows.consumeSealedTimeouts(); count > 0; count -= 1) {
                 this.metrics.increment("timeouts");
-                this.sentAtBySequence.delete(sequenceNo);
             }
         } finally {
             await this.close();
@@ -157,10 +163,11 @@ class VirtualSession {
         }
         const capturedAt = new Date().toISOString();
         const videoTimeSec = Math.max(0, (Date.now() / 1000) % 3600);
+        const sentAtMs = Date.now();
         this.inFlight = true;
-        this.sentAtBySequence.set(sequenceNo, Date.now());
         try {
             const accepted = await this.postFrame(sequenceNo, capturedAt, videoTimeSec);
+            if (accepted) this.scoreWindows.recordAcceptedFrame(sequenceNo, capturedAt, sentAtMs);
             if (accepted && this.config.faultInjection.has("duplicate-frame") && sequenceNo === 3) {
                 await this.postFrame(sequenceNo, capturedAt, videoTimeSec);
             }
@@ -227,11 +234,8 @@ class VirtualSession {
             return;
         }
         this.metrics.increment("analysisResultsReceived");
-        if (typeof event.sourceSequenceNo !== "number") return;
-        const sentAt = this.sentAtBySequence.get(event.sourceSequenceNo);
-        if (sentAt === undefined) return;
-        this.metrics.recordLatency(Date.now() - sentAt);
-        this.sentAtBySequence.delete(event.sourceSequenceNo);
+        const latencyMs = this.scoreWindows.recordAnalysisEvent(event, Date.now());
+        if (latencyMs !== undefined) this.metrics.recordLatency(latencyMs);
     }
 
     private async injectConfiguredFaults(): Promise<void> {

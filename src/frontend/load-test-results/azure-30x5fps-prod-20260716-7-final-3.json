@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 2,
+  "completedAt": "2026-07-16T09:26:30.966Z",
+  "configuration": {
+    "targetKind": "azure",
+    "concurrentSessions": 30,
+    "durationSeconds": 90,
+    "framesPerSecond": 5,
+    "rampUpSeconds": 30,
+    "resultTimeoutSeconds": 20,
+    "faultInjection": []
+  },
+  "summary": {
+    "sessionsCreated": 30,
+    "framesOffered": 13470,
+    "framesSent": 12968,
+    "framesNotSentDueToInFlightLimit": 502,
+    "acceptedFrames": 12968,
+    "retryableRejections": 0,
+    "permanentRejections": 0,
+    "retransmissions": 0,
+    "signalRReconnects": 0,
+    "analysisResultsReceived": 2556,
+    "crossSessionDeliveries": 0,
+    "timeouts": 0,
+    "totalDurationMs": 140206,
+    "frameToResultLatencyMs": {
+      "samples": 2526,
+      "p50": 780,
+      "p95": 1154,
+      "p99": 1441,
+      "max": 1741
+    }
+  },
+  "assertions": {
+    "sessionIsolation": true,
+    "sameSessionAcceptanceOrder": true,
+    "parallelSessionsActivated": true,
+    "noTimeouts": true,
+    "frameToResultLatencySlo": true
+  }
+}
