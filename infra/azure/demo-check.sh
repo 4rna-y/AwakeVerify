@@ -112,8 +112,9 @@ if resource_exists "$DEMO_WORKER_APP" "Microsoft.App/containerApps"; then
 fi
 
 if [[ -n "${frontend_image:-}" && -n "${backend_image:-}" && -n "${worker_image:-}" ]]; then
-    deployed_tag="$(assert_same_immutable_image_tag "${DEMO_EXPECTED_IMAGE_TAG:-}" "$frontend_image" "$backend_image" "$worker_image")"
-    printf 'Shared immutable image tag: %s\n' "$deployed_tag"
+    assert_expected_immutable_image "Frontend" "$frontend_image" "${DEMO_EXPECTED_FRONTEND_IMAGE:-}"
+    assert_expected_immutable_image "Backend" "$backend_image" "${DEMO_EXPECTED_BACKEND_IMAGE:-}"
+    assert_expected_immutable_image "Worker" "$worker_image" "${DEMO_EXPECTED_WORKER_IMAGE:-}"
 fi
 
 printf '\nHealth endpoints:\n'

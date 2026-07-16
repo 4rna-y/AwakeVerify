@@ -223,13 +223,12 @@ assert_bicep_images_use_shared_tag() {
 
 assert_parameter_file_image_contract() {
     local parameters_file="$1"
-    local expected_tag="$2"
     local parameter_name image
     [[ -f "$parameters_file" ]] || fail "Parameter file does not exist: $parameters_file"
     for parameter_name in frontendImage backendImage workerImage; do
         image="$(parameter_value "$parameters_file" "$parameter_name" 2>/dev/null || true)"
         if [[ -n "$image" ]]; then
-            assert_same_immutable_image_tag "$expected_tag" "$image" >/dev/null
+            is_immutable_image_reference "$image" || fail "Parameter '$parameter_name' contains a mutable or ambiguous image reference."
         fi
     done
 }
@@ -295,6 +294,32 @@ assert_same_immutable_image_tag() {
     printf '%s\n' "$common_tag"
 }
 
+image_digest_from_reference() {
+    local image="$1"
+    [[ "$image" =~ @sha256:([0-9a-f]{64})$ ]] || return 1
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+assert_expected_immutable_image() {
+    local component="$1"
+    local actual="$2"
+    local expected="${3:-}"
+    local actual_digest expected_digest
+
+    is_immutable_image_reference "$actual" || fail "$component image is mutable or ambiguous: $actual"
+    if [[ -z "$expected" ]]; then
+        printf '%s image: %s\n' "$component" "$actual"
+        return 0
+    fi
+
+    is_immutable_image_reference "$expected" || fail "Expected $component image is mutable or ambiguous: $expected"
+    actual_digest="$(image_digest_from_reference "$actual" || true)"
+    expected_digest="$(image_digest_from_reference "$expected" || true)"
+    [[ -n "$actual_digest" && "$actual_digest" == "$expected_digest" ]] || \
+        fail "$component image digest does not match the requested immutable artifact."
+    printf '%s image digest: sha256:%s\n' "$component" "$actual_digest"
+}
+
 containerapp_domain_handoff_row() {
     local app="$1"
     local row environment_id verification_id static_ip
@@ -302,7 +327,7 @@ containerapp_domain_handoff_row() {
         --name "$app" \
         --resource-group "$DEMO_RESOURCE_GROUP" \
         --query '[properties.managedEnvironmentId,properties.customDomainVerificationId]' \
-        --output tsv 2>/dev/null)" || return 1
+        --output json 2>/dev/null | jq -r '@tsv')" || return 1
     IFS=$'\t' read -r environment_id verification_id <<< "$row"
     [[ -n "$environment_id" && -n "$verification_id" ]] || return 1
     static_ip="$(az resource show --ids "$environment_id" --query properties.staticIp --output tsv 2>/dev/null)" || return 1
@@ -382,7 +407,7 @@ quota_values() {
         --name "$DEMO_CONTAINER_ENV" \
         --resource-group "$DEMO_RESOURCE_GROUP" \
         --output json 2>/dev/null)" || return 1
-    row="$(jq -r '[.[] | select((((.name.localizedValue // "") + " " + (.name.value // "")) | ascii_downcase | contains("core")))] | first | if . == null then empty else [.currentValue,.limit] | @tsv end' <<< "$usages")"
+    row="$(jq -r '[(.value // .)[] | select((((.name.localizedValue // "") + " " + (.name.value // "")) | ascii_downcase | contains("core")))] | first | if . == null then empty else [.currentValue,.limit] | @tsv end' <<< "$usages")"
     IFS=$'\t' read -r current limit <<< "$row"
     [[ "$current" =~ ^[0-9]+([.][0-9]+)?$ && "$limit" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
     printf '%s\t%s\n' "$current" "$limit"
@@ -403,7 +428,7 @@ containerapp_scale_row() {
         --name "$1" \
         --resource-group "$DEMO_RESOURCE_GROUP" \
         --query '[name,properties.template.scale.minReplicas,properties.template.scale.maxReplicas]' \
-        --output tsv 2>/dev/null
+        --output json 2>/dev/null | jq -r '@tsv'
 }
 
 containerapp_scale_matches() {

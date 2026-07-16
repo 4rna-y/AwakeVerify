@@ -24,7 +24,9 @@ cleanup_runtime_files() {
 }
 trap cleanup_runtime_files EXIT
 
-image_tag="${AZURE_IMAGE_TAG:?Set AZURE_IMAGE_TAG to an immutable published GHCR tag}"
+frontend_image="${AZURE_FRONTEND_IMAGE:?Set AZURE_FRONTEND_IMAGE to the digest-pinned Frontend image reference}"
+backend_image="${AZURE_BACKEND_IMAGE:?Set AZURE_BACKEND_IMAGE to the digest-pinned Backend image reference}"
+worker_image="${AZURE_WORKER_IMAGE:?Set AZURE_WORKER_IMAGE to the digest-pinned Worker image reference}"
 backend_api_app_id="${AZURE_BACKEND_API_APP_ID:?Set AZURE_BACKEND_API_APP_ID to the Backend API App Registration client ID}"
 
 assert_azure_context
@@ -34,19 +36,21 @@ assert_workload_bicep_contract
 assert_bicep_images_use_shared_tag
 assert_bicep_zero_scale_contract frontendMinReplicas
 assert_bicep_zero_scale_contract backendMinInstances
-assert_immutable_image_tag "$image_tag"
-assert_parameter_file_image_contract "$DEMO_WORKSPACE_ROOT/infra/azure/nonprod.parameters.json" "$image_tag"
-assert_parameter_file_image_contract "$parameters_file" "$image_tag"
+assert_expected_immutable_image "Frontend requested" "$frontend_image" "$frontend_image" >/dev/null
+assert_expected_immutable_image "Backend requested" "$backend_image" "$backend_image" >/dev/null
+assert_expected_immutable_image "Worker requested" "$worker_image" "$worker_image" >/dev/null
+assert_parameter_file_image_contract "$DEMO_WORKSPACE_ROOT/infra/azure/nonprod.parameters.json"
+assert_parameter_file_image_contract "$parameters_file"
 
 printf '\nRecreate plan (existing deployment scripts and their TTY prompts are preserved):\n'
 printf '1. Bicep build and foundation validation\n'
 printf '2. Foundation deployment via deploy.sh\n'
 printf '3. resrc/60s.mp4 upload and read-only SAS creation via demo-video-upload.sh\n'
 printf '4. Secret lessonVideoUrl and lessonVideoId=60s injection into a mode-0600 runtime parameter file\n'
-printf '5. Frontend-enabled workload validation and deployment via deploy-workloads.sh\n'
-printf '6. analysis_worker app-role assignment to the new Worker managed identity\n'
-printf '7. Replica, health, lesson env contract, queue, Outbox, image, and quota checks via demo-check.sh\n'
-printf 'Target: %s / prefix %s / image tag %s\n' "$DEMO_RESOURCE_GROUP" "$DEMO_NAME_PREFIX" "$image_tag"
+printf '5. Frontend-enabled workload validation and Worker deployment at min=0 via deploy-workloads.sh\n'
+printf '6. analysis_worker app-role assignment before any Worker token is issued\n'
+printf '7. Worker warm-up to 12 replicas, then replica, health, lesson env contract, queue, Outbox, image, and quota checks via demo-check.sh\n'
+printf 'Target: %s / prefix %s / digest-pinned Frontend, Backend, and Worker images\n' "$DEMO_RESOURCE_GROUP" "$DEMO_NAME_PREFIX"
 printf 'Secure parameter values are intentionally not displayed.\n'
 
 if [[ "${ALLOW_AZURE_DEMO_RECREATE:-false}" != "true" ]]; then
@@ -67,14 +71,19 @@ jq '
     | .parameters.frontendMaxReplicas = {"value": 1}
     | .parameters.backendMinInstances = {"value": 2}
     | .parameters.backendMaxInstances = {"value": 2}
-    | .parameters.workerMinReplicas = {"value": 12}
+    # A managed identity token can be cached for around 24 hours. Do not start
+    # the Worker until its analysis_worker app role is present, or its first
+    # token can lack the role for the whole demo window.
+    | .parameters.workerMinReplicas = {"value": 0}
     | .parameters.workerMaxReplicas = {"value": 15}
 ' "$parameters_file" > "$runtime_parameters_file"
 chmod 600 "$runtime_parameters_file"
 
 export AZURE_RESOURCE_GROUP="$DEMO_RESOURCE_GROUP"
 export AZURE_PARAMETERS_FILE="$runtime_parameters_file"
-export AZURE_IMAGE_TAG="$image_tag"
+export AZURE_FRONTEND_IMAGE="$frontend_image"
+export AZURE_BACKEND_IMAGE="$backend_image"
+export AZURE_WORKER_IMAGE="$worker_image"
 
 bash "$script_dir/validate.sh"
 bash "$script_dir/deploy.sh"
@@ -110,13 +119,38 @@ az deployment group validate \
     --template-file "$DEMO_WORKSPACE_ROOT/infra/azure/main.bicep" \
     --parameters "@$DEMO_WORKSPACE_ROOT/infra/azure/nonprod.parameters.json" \
     --parameters "@$runtime_parameters_file" \
-    --parameters deployWorkloads=true deployFrontend=true imageTag="$image_tag" \
+    --parameters deployWorkloads=true deployFrontend=true \
+    --parameters frontendImage="$frontend_image" \
+    --parameters backendImage="$backend_image" \
+    --parameters workerImage="$worker_image" \
     --output none
 bash "$script_dir/deploy-workloads.sh"
 assert_shared_resources_preserved
 frontend_app="${DEMO_FRONTEND_APP_NAME:-$DEMO_FRONTEND_APP_DEFAULT}"
 is_allowed_frontend_app_name "$frontend_app" || fail "Recreate Frontend target is not allow-listed: $frontend_app"
 assert_resource "$frontend_app" "Microsoft.App/containerApps" >/dev/null
+
+# Ensure a prior Worker revision cannot start and cache a token before the
+# current revision's managed identity has its application role.
+worker_deployed_revision="$(az containerapp show \
+    --name "$DEMO_WORKER_APP" \
+    --resource-group "$DEMO_RESOURCE_GROUP" \
+    --query properties.latestRevisionName \
+    --output tsv 2>/dev/null)" || fail "Unable to read the deployed Worker revision."
+[[ -n "$worker_deployed_revision" ]] || fail "Deployed Worker revision is empty."
+while IFS= read -r worker_previous_revision; do
+    [[ -z "$worker_previous_revision" || "$worker_previous_revision" == "$worker_deployed_revision" ]] && continue
+    az containerapp revision deactivate \
+        --name "$DEMO_WORKER_APP" \
+        --resource-group "$DEMO_RESOURCE_GROUP" \
+        --revision "$worker_previous_revision" \
+        --only-show-errors \
+        --output none || fail "Unable to deactivate stale Worker revision: $worker_previous_revision"
+done < <(az containerapp revision list \
+    --name "$DEMO_WORKER_APP" \
+    --resource-group "$DEMO_RESOURCE_GROUP" \
+    --query '[?properties.active].name' \
+    --output tsv)
 
 worker_principal_id="$(az containerapp show \
     --name "$DEMO_WORKER_APP" \
@@ -153,6 +187,37 @@ assignment_id="$(az rest \
 [[ -n "$assignment_id" ]] || fail "analysis_worker app-role assignment is still absent."
 printf 'Verified analysis_worker app-role assignment for the Worker managed identity.\n'
 
+# The Worker was intentionally deployed at zero replicas so no role-less
+# managed identity token exists. Start the warm profile only after the Graph
+# assignment is visible.
+az containerapp update \
+    --name "$DEMO_WORKER_APP" \
+    --resource-group "$DEMO_RESOURCE_GROUP" \
+    --min-replicas 12 \
+    --max-replicas 15 \
+    --only-show-errors \
+    --output none || fail "Unable to warm the Worker after assigning its app role."
+
+worker_latest_revision="$(az containerapp show \
+    --name "$DEMO_WORKER_APP" \
+    --resource-group "$DEMO_RESOURCE_GROUP" \
+    --query properties.latestRevisionName \
+    --output tsv 2>/dev/null)" || fail "Unable to read the latest Worker revision."
+[[ -n "$worker_latest_revision" ]] || fail "Latest Worker revision is empty after warm-up."
+while IFS= read -r worker_previous_revision; do
+    [[ -z "$worker_previous_revision" || "$worker_previous_revision" == "$worker_latest_revision" ]] && continue
+    az containerapp revision deactivate \
+        --name "$DEMO_WORKER_APP" \
+        --resource-group "$DEMO_RESOURCE_GROUP" \
+        --revision "$worker_previous_revision" \
+        --only-show-errors \
+        --output none || fail "Unable to deactivate stale Worker revision: $worker_previous_revision"
+done < <(az containerapp revision list \
+    --name "$DEMO_WORKER_APP" \
+    --resource-group "$DEMO_RESOURCE_GROUP" \
+    --query '[?properties.active].name' \
+    --output tsv)
+
 wait_for_ready_replicas "$frontend_app" 1
 wait_for_ready_replicas "$DEMO_BACKEND_APP" 2
 wait_for_ready_replicas "$DEMO_WORKER_APP" 12
@@ -180,7 +245,9 @@ DEMO_FRONTEND_APP_NAME="$frontend_app" \
 DEMO_FRONTEND_BASE_URL="https://${frontend_fqdn}" \
 DEMO_BACKEND_BASE_URL="https://${backend_fqdn}" \
 DEMO_REQUIRE_CUSTOM_DOMAINS=false \
-DEMO_EXPECTED_IMAGE_TAG="$image_tag" \
+DEMO_EXPECTED_FRONTEND_IMAGE="$frontend_image" \
+DEMO_EXPECTED_BACKEND_IMAGE="$backend_image" \
+DEMO_EXPECTED_WORKER_IMAGE="$worker_image" \
 DEMO_EXPECTED_FRONTEND_READY=1 \
 DEMO_EXPECTED_FRONTEND_MAX=1 \
 DEMO_EXPECTED_BACKEND_READY=2 \

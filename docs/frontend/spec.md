@@ -250,6 +250,8 @@ response:
 
 フロントエンドは取得した `sessionId` を同一ブラウザタブ内の受講中状態として保持し、Backendが発行するHttpOnly `student_session` Cookieと組み合わせて `/student/session` へ遷移する。キャリブレーション成功通知を受信した場合と動画再生中の秒単位進捗も同じ状態へ記録するが、クライアント記録は再生許可の根拠にしない。
 
+既存の認証Cookieがある状態で受講者が新規開始する場合、Frontendは先に `GET /api/auth/me` を実行し、応答の `X-CSRF-Token` を取得してから `POST /api/sessions` を送る。API originのCSRF cookieはhost-onlyであり、Frontend originのJavaScriptから直接読まない。匿名時の `401` は開始要求を妨げない。
+
 `/student/session` の初期認証で `401`・`403`、またはCookieのセッションと保持した `sessionId` の不一致を検出した場合、フロントエンドは保持した受講中状態を削除して `/student` へ遷移する。認証確認APIの一時的な失敗は受講ページ上にエラーとして表示する。
 
 動画の手動停止時は `manual_pause`、眠気または顔未検出による停止時は `auto_pause`、停止後の実再生開始時は `resume`、動画終了時は `completed` を `POST /api/sessions/{sessionId}/playback-events` へ送信する。動画終了時の `completed` は、タイマーと`<video>`要素の終了通知が重複しても一度だけ送信する。

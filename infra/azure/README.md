@@ -30,7 +30,7 @@
 - Backend は Service Bus の `Send` 専用 SAS、Worker は `Listen` 専用 SAS を受け取る。ACA scaler は queue runtime metrics を読むため、Worker プロセスへ渡さない queue-scoped `Manage` 専用 SAS を別 secret として使用する。
 - frame queue は Session と duplicate detection を有効にする。Backend は HTTP idempotency key `(sessionId, sequenceNo)` と同じ安定した Message ID を使い、`serviceBusDuplicateDetectionHistoryTimeWindow` は最大 HTTP retry horizon を必ず上回らせる。既定の `PT1H` は初期値であり、client retry policy を延長する場合は同時に見直す。
 - Blob は Backend 用に read/add/create/write/delete/list、Worker 用に read/list の短期 Account SAS を生成する。SAS は `blobSasExpiry` で失効するため、負荷試験中に期限を過ぎない値を設定し、不要になれば Storage account ごと削除する。
-- GHCR image は public とし、Azure の registry credential や `AcrPull` role assignment を使わない。Worker の System Assigned Managed Identity には、Entra ID の管理操作として `analysis_worker` app role を別途割り当てる。
+- GHCR image は public とし、Azure の registry credential や `AcrPull` role assignment を使わない。Worker の System Assigned Managed Identity には、Entra ID の管理操作として `analysis_worker` app role を別途割り当てる。Managed Identity の token はロール変更前の claim を長時間キャッシュし得るため、Worker は `minReplicas=0` で配置し、app role 割当の確認後にだけ warm profile へ scale up する。
 
 ## Secure parameter file
 
@@ -101,16 +101,18 @@ AZURE_IMAGE_TAG=20260715-a1b2c3d \
 bash infra/azure/build-images.sh
 ```
 
-### 3. Backend と Worker を配置する
+### 3. Frontend、Backend、Worker を配置する
 
 ```bash
 AZURE_RESOURCE_GROUP=awaver-devtest-rg \
 AZURE_PARAMETERS_FILE=infra/azure/nonprod.secrets.parameters.json \
-AZURE_IMAGE_TAG=20260715-a1b2c3d \
+AZURE_FRONTEND_IMAGE=ghcr.io/4rna-y/awaver-frontend@sha256:<frontend-digest> \
+AZURE_BACKEND_IMAGE=ghcr.io/4rna-y/awaver-backend@sha256:<backend-digest> \
+AZURE_WORKER_IMAGE=ghcr.io/4rna-y/awaver-worker@sha256:<worker-digest> \
 bash infra/azure/deploy-workloads.sh
 ```
 
-`AZURE_IMAGE_TAG` には、公開済みの immutable GHCR tag を必ず指定する。`latest`、`test`、placeholder は script が拒否する。同じ tag は command が `imageTag` parameter として渡すため、通常 parameter file の placeholder を編集しない。
+`AZURE_FRONTEND_IMAGE`、`AZURE_BACKEND_IMAGE`、`AZURE_WORKER_IMAGE`には、それぞれ公開済みGHCR artifactの`@sha256:`付きdigest-pinned referenceを指定する。可変tagだけの指定は拒否する。通常parameter fileのplaceholderを編集しない。
 
 public GHCR image の pull に Azure role assignment は不要である。
 

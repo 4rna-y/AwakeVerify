@@ -47,6 +47,11 @@ export default function StudentPage({ lessonVideoId }: { lessonVideoId: string }
         setMessage(null);
 
         try {
+            // The API's CSRF cookie is host-only on api.awaver.4rnay.net, so it
+            // cannot be read directly from this Frontend origin after a reload.
+            // An existing auth session returns the token through the documented
+            // /api/auth/me response header; an anonymous 401 is harmless here.
+            await apiFetch("/api/auth/me", { cache: "no-store" });
             const response = await apiFetch("/api/sessions", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },

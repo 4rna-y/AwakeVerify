@@ -25,7 +25,9 @@ require_demo_quota
 frontend_image="$(current_container_image "$frontend_app")" || fail "Unable to read Frontend image."
 backend_image="$(current_container_image "$DEMO_BACKEND_APP")" || fail "Unable to read Backend image."
 worker_image="$(current_container_image "$DEMO_WORKER_APP")" || fail "Unable to read Worker image."
-assert_same_immutable_image_tag "${DEMO_EXPECTED_IMAGE_TAG:-}" "$frontend_image" "$backend_image" "$worker_image" >/dev/null
+assert_expected_immutable_image "Frontend" "$frontend_image" "${DEMO_EXPECTED_FRONTEND_IMAGE:-}" >/dev/null
+assert_expected_immutable_image "Backend" "$backend_image" "${DEMO_EXPECTED_BACKEND_IMAGE:-}" >/dev/null
+assert_expected_immutable_image "Worker" "$worker_image" "${DEMO_EXPECTED_WORKER_IMAGE:-}" >/dev/null
 
 printf '\nCurrent scale profile:\n'
 print_containerapp_scale "$frontend_app"
