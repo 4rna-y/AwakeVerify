@@ -57,6 +57,7 @@
 
 - 各 Session のフレーム処理順は、clientの1 in-flight制約によりenqueueされた `sequenceNo` 順であり、capture skipによる欠番は後続frameを妨げない。Session 間の処理完了順は拘束しない。
 - 同一Session内のキャリブレーション、PERCLOS、解析結果の既存契約と直列処理が維持される。
+- Session slot移動、Worker再起動、または再配送の前後でも、同じ `sessionId`・UTC秒に対する `drowsiness_score` は最大1件であり、Backend受理前の同一scoreだけを再送する。
 - 異なる Session の処理が複数 slot/replica に分散し、単一 Worker または単一 Backend instance への固定割当にならない。
 - Worker からの再送、Outbox の crash 境界による再試行でも、解析結果は既存の冪等キーにより重複保存されない。通知は at-least-once のため重複受信を許容する。
 - Backend 接続 instance と Outbox 処理 instance が異なっても、対象 Session の認可済み接続へ通知が届く。

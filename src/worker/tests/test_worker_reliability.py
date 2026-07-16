@@ -33,7 +33,15 @@ from app.main import (
     run_worker_loop,
     stop_event,
 )
-from app.perclos import MINIMUM_TTL_SECONDS, PERCLOS_APPEND_SCRIPT, RedisPerclosWindow
+from app.perclos import (
+    MINIMUM_TTL_SECONDS,
+    PERCLOS_APPEND_SCRIPT,
+    SCORE_AGGREGATION_ACK_SCRIPT,
+    SCORE_AGGREGATION_ADVANCE_SCRIPT,
+    SCORE_AGGREGATION_CLEAR_SCRIPT,
+    RedisPerclosWindow,
+    RedisScoreAggregationWindow,
+)
 from shared.tracking.calibration import CalibrationTracker
 from shared.tracking.models import FaceMetrics
 
@@ -43,13 +51,57 @@ class RedisDouble:
 
     def __init__(self) -> None:
         self.values: dict[str, list[str]] = {}
+        self.score_values: dict[str, dict[str, object]] = {}
         self.ttl: dict[str, int] = {}
         self.scripts: list[str] = []
 
-    def eval(self, script: str, numkeys: int, *keys_and_args: object) -> list[object]:
+    def eval(self, script: str, numkeys: int, *keys_and_args: object) -> object:
         self.scripts.append(script)
         assert numkeys == 1
         key = cast(str, keys_and_args[0])
+        if script == SCORE_AGGREGATION_ADVANCE_SCRIPT:
+            current_window = cast(int, keys_and_args[1])
+            sample_record = cast(str, keys_and_args[2])
+            maximum_samples = cast(int, keys_and_args[3])
+            ttl_seconds = cast(int, keys_and_args[4])
+            state = self.score_values.setdefault(key, {
+                "currentWindowUnixSecond": current_window,
+                "samples": [],
+                "pending": [],
+            })
+            stored_window = cast(int, state["currentWindowUnixSecond"])
+            samples = cast(list[str], state["samples"])
+            pending = cast(list[dict[str, object]], state["pending"])
+            if current_window > stored_window:
+                if samples:
+                    pending.append({"windowUnixSecond": stored_window, "samples": samples.copy()})
+                state["currentWindowUnixSecond"] = current_window
+                samples = []
+                state["samples"] = samples
+            elif current_window < stored_window:
+                sample_record = ""
+            if sample_record:
+                sequence_no = json.loads(sample_record)["sequenceNo"]
+                duplicate = any(json.loads(existing)["sequenceNo"] == sequence_no for existing in samples)
+                if not duplicate and len(samples) < maximum_samples:
+                    samples.append(sample_record)
+            self.ttl[key] = ttl_seconds
+            return json.dumps(pending).encode("utf-8")
+        if script == SCORE_AGGREGATION_ACK_SCRIPT:
+            window = cast(int, keys_and_args[1])
+            ttl_seconds = cast(int, keys_and_args[2])
+            state = self.score_values.get(key)
+            if state is None:
+                return 0
+            pending = cast(list[dict[str, object]], state["pending"])
+            retained = [item for item in pending if item["windowUnixSecond"] != window]
+            state["pending"] = retained
+            self.ttl[key] = ttl_seconds
+            return len(pending) - len(retained)
+        if script == SCORE_AGGREGATION_CLEAR_SCRIPT:
+            self.score_values.pop(key, None)
+            return 1
+
         sequence_no = cast(int, keys_and_args[1])
         record = cast(str, keys_and_args[2])
         window_size = cast(int, keys_and_args[3])
@@ -192,6 +244,7 @@ class WorkerReliabilityTests(TestCase):
     def test_calibration_contains_source_sequence_and_scored_result_uses_captured_second(self) -> None:
         redis = RedisDouble()
         perclos = RedisPerclosWindow(redis)
+        score_aggregation = RedisScoreAggregationWindow(redis)
         publisher = RecordingPublisher()
         states: dict[str, SessionAnalysisState] = {
             self.session_id: SessionAnalysisState(
@@ -207,6 +260,7 @@ class WorkerReliabilityTests(TestCase):
             decoder=decoder,
             publisher=publisher,  # type: ignore[arg-type]
             perclos_window=perclos,
+            score_aggregation=score_aggregation,
             states=states,
         )
         calibration = publisher.payloads[0]
@@ -224,6 +278,7 @@ class WorkerReliabilityTests(TestCase):
                 decoder=decoder,
                 publisher=publisher,  # type: ignore[arg-type]
                 perclos_window=perclos,
+                score_aggregation=score_aggregation,
                 states=states,
             )
 
@@ -233,6 +288,7 @@ class WorkerReliabilityTests(TestCase):
             decoder=decoder,
             publisher=publisher,  # type: ignore[arg-type]
             perclos_window=perclos,
+            score_aggregation=score_aggregation,
             states=states,
         )
 
@@ -246,6 +302,7 @@ class WorkerReliabilityTests(TestCase):
     def test_score_window_publishes_a_partial_aggregate_at_the_next_second(self) -> None:
         redis = RedisDouble()
         perclos = RedisPerclosWindow(redis)
+        score_aggregation = RedisScoreAggregationWindow(redis)
         publisher = RecordingPublisher()
         states: dict[str, SessionAnalysisState] = {
             self.session_id: SessionAnalysisState(
@@ -261,6 +318,7 @@ class WorkerReliabilityTests(TestCase):
             decoder=decoder,
             publisher=publisher,  # type: ignore[arg-type]
             perclos_window=perclos,
+            score_aggregation=score_aggregation,
             states=states,
         )
         for sequence_no in (2, 3):
@@ -273,6 +331,7 @@ class WorkerReliabilityTests(TestCase):
                 decoder=decoder,
                 publisher=publisher,  # type: ignore[arg-type]
                 perclos_window=perclos,
+                score_aggregation=score_aggregation,
                 states=states,
             )
 
@@ -282,6 +341,7 @@ class WorkerReliabilityTests(TestCase):
             decoder=decoder,
             publisher=publisher,  # type: ignore[arg-type]
             perclos_window=perclos,
+            score_aggregation=score_aggregation,
             states=states,
         )
 
@@ -289,6 +349,84 @@ class WorkerReliabilityTests(TestCase):
         self.assertEqual(score["type"], "drowsiness_score")
         self.assertEqual(score["sourceSequenceNo"], 3)
         self.assertEqual(score["scoredAt"], "2026-06-14T10:00:00Z")
+
+    def test_score_window_survives_session_slot_migration_without_duplicate_second(self) -> None:
+        redis = RedisDouble()
+        perclos = RedisPerclosWindow(redis)
+        score_aggregation = RedisScoreAggregationWindow(redis)
+        publisher = RecordingPublisher()
+        decoder = FrameDecoder(decode_payload=lambda payload, codec: payload)
+        started_at = datetime(2026, 6, 14, 10, 0, tzinfo=UTC)
+        first_slot_states = {
+            self.session_id: SessionAnalysisState(
+                calibration=CalibrationTracker(target_frames=1, min_valid_frames=1)
+            )
+        }
+        second_slot_state = SessionAnalysisState()
+
+        process_frame(
+            self.envelope(1, started_at),
+            analyzer=MetricsAnalyzer(FaceMetrics(ear=0.4, pitch_deg=0, yaw_deg=0)),
+            decoder=decoder,
+            publisher=publisher,  # type: ignore[arg-type]
+            perclos_window=perclos,
+            score_aggregation=score_aggregation,
+            states=first_slot_states,
+        )
+        restore_calibration(
+            second_slot_state,
+            {
+                "earOpen": 0.4,
+                "earThreshold": 0.3,
+                "validFrames": 15,
+                "totalFrames": 25,
+                "sourceSequenceNo": 1,
+                "calibratedAt": "2026-06-14T10:00:00Z",
+            },
+        )
+
+        process_frame(
+            self.envelope(2, started_at + timedelta(milliseconds=200)),
+            analyzer=MetricsAnalyzer(FaceMetrics(ear=0.2, pitch_deg=0, yaw_deg=0)),
+            decoder=decoder,
+            publisher=publisher,  # type: ignore[arg-type]
+            perclos_window=perclos,
+            score_aggregation=score_aggregation,
+            states=first_slot_states,
+        )
+        process_frame(
+            self.envelope(3, started_at + timedelta(milliseconds=400)),
+            analyzer=MetricsAnalyzer(FaceMetrics(ear=0.2, pitch_deg=0, yaw_deg=0)),
+            decoder=decoder,
+            publisher=publisher,  # type: ignore[arg-type]
+            perclos_window=perclos,
+            score_aggregation=score_aggregation,
+            states={self.session_id: second_slot_state},
+        )
+        process_frame(
+            self.envelope(4, started_at + timedelta(seconds=1)),
+            analyzer=MetricsAnalyzer(FaceMetrics(ear=0.2, pitch_deg=0, yaw_deg=0)),
+            decoder=decoder,
+            publisher=publisher,  # type: ignore[arg-type]
+            perclos_window=perclos,
+            score_aggregation=score_aggregation,
+            states=first_slot_states,
+        )
+        process_frame(
+            self.envelope(5, started_at + timedelta(seconds=2)),
+            analyzer=MetricsAnalyzer(FaceMetrics(ear=0.2, pitch_deg=0, yaw_deg=0)),
+            decoder=decoder,
+            publisher=publisher,  # type: ignore[arg-type]
+            perclos_window=perclos,
+            score_aggregation=score_aggregation,
+            states={self.session_id: second_slot_state},
+        )
+
+        scores = [payload for payload in publisher.payloads if payload["type"] == "drowsiness_score"]
+        self.assertEqual([payload["scoredAt"] for payload in scores], ["2026-06-14T10:00:00Z", "2026-06-14T10:00:01Z"])
+        self.assertEqual([payload["sourceSequenceNo"] for payload in scores], [3, 4])
+        state = redis.score_values[score_aggregation.key_for(self.session_id)]
+        self.assertEqual(state["pending"], [])
 
     def test_service_bus_frame_reference_restores_required_video_time_sec(self) -> None:
         message = {
@@ -376,6 +514,7 @@ class WorkerReliabilityTests(TestCase):
     def test_face_not_detected_does_not_mutate_perclos_and_posts_tracking_status(self) -> None:
         redis = RedisDouble()
         perclos = RedisPerclosWindow(redis)
+        score_aggregation = RedisScoreAggregationWindow(redis)
         publisher = RecordingPublisher()
         states: dict[str, SessionAnalysisState] = {}
 
@@ -496,6 +635,7 @@ class WorkerReliabilityTests(TestCase):
     def test_incomplete_second_window_is_published_without_mixing_seconds(self) -> None:
         redis = RedisDouble()
         perclos = RedisPerclosWindow(redis)
+        score_aggregation = RedisScoreAggregationWindow(redis)
         publisher = RecordingPublisher()
         state = SessionAnalysisState()
         restore_calibration(
@@ -512,8 +652,8 @@ class WorkerReliabilityTests(TestCase):
         decoder = FrameDecoder(decode_payload=lambda payload, codec: payload)
         base = datetime(2026, 6, 14, 10, 0, 0, 100_000, tzinfo=UTC)
         for sequence_no in range(2, 6):
-            process_frame(self.envelope(sequence_no, base), analyzer=MetricsAnalyzer(FaceMetrics(0.2, 0, 0)), decoder=decoder, publisher=publisher, perclos_window=perclos, states={self.session_id: state})
-        process_frame(self.envelope(6, base + timedelta(seconds=1)), analyzer=MetricsAnalyzer(FaceMetrics(0.2, 0, 0)), decoder=decoder, publisher=publisher, perclos_window=perclos, states={self.session_id: state})
+            process_frame(self.envelope(sequence_no, base), analyzer=MetricsAnalyzer(FaceMetrics(0.2, 0, 0)), decoder=decoder, publisher=publisher, perclos_window=perclos, score_aggregation=score_aggregation, states={self.session_id: state})
+        process_frame(self.envelope(6, base + timedelta(seconds=1)), analyzer=MetricsAnalyzer(FaceMetrics(0.2, 0, 0)), decoder=decoder, publisher=publisher, perclos_window=perclos, score_aggregation=score_aggregation, states={self.session_id: state})
         scores = [payload for payload in publisher.payloads if payload["type"] == "drowsiness_score"]
         self.assertEqual(len(scores), 1)
         self.assertEqual(scores[0]["sourceSequenceNo"], 5)

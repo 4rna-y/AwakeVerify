@@ -31,7 +31,7 @@ Backend、Worker、PostgreSQL、Redis、Azurite、Service Bus Emulator を起動
 | `OUTPUT_PATH` | `load-test-results/report.json` | 機械可読レポート出力先。 |
 | `FAULT_INJECTION` | 空 | `signalr-reconnect`,`skip-sequence`,`duplicate-frame` をカンマ区切りで指定。 |
 
-Azure の高負荷条件（5 Session超、60秒超、5fps超）では、開始前に対象 URL、Session 数、時間、推定送信量、コスト影響を端末へ表示し、`ALLOW_AZURE_LOAD_TEST=true` と TTY の `START` 入力がなければ実行しません。この事前確認は永続レポートには保存しません。
+Azure の高負荷条件（5 Session超、60秒超、5fps超）では、開始前に対象 URL、Session 数、時間、推定送信量、コスト影響を端末へ表示し、`ALLOW_AZURE_LOAD_TEST=true` と TTY の `START` 入力がなければ実行しません。Azure の既定ドメインに加え、Azure デモの `*.awaver.4rnay.net` custom domain もこの確認対象です。この事前確認は永続レポートには保存しません。
 
 ## 実行する経路と認証
 

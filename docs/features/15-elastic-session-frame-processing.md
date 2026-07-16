@@ -47,7 +47,7 @@ Backend、Worker、Outbox、SignalR配信を、受講セッション単位で弾
 - 各 slot は `NEXT_AVAILABLE_SESSION` などで取得した一つの Session を処理し、空になった Session receiver を閉じて次の利用可能 Session を取得できるようにする。
 - Service Bus Session lock の更新失敗または lock 消失を検知した後は、その lock に属するメッセージを `complete`、`abandon`、dead-letter してはならない。receiver を閉じ、当該 slot の未処理作業を中断する。Service Bus による再配送を待つ。
 - 停止シグナルまたは scale-in を受けた Worker は、新しい Session の取得を直ちに止める。既に所有する Session は、lock が有効な間に処理済みメッセージだけを安全に settle し、処理中のメッセージを完了扱いにしない。猶予時間内に安全に終了できない場合は receiver を閉じて再配送に委ねる。
-- Worker プロセスまたは replica の障害後、lock の期限または receiver の解放後に、別 Worker が当該 Session を再取得できなければならない。JPEGデコードに引き継ぐローカル状態はない。Redisの永続冪等キー、キャリブレーション、およびPERCLOS状態は維持する。
+- Worker プロセスまたは replica の障害後、lock の期限または receiver の解放後に、別 Worker が当該 Session を再取得できなければならない。JPEGデコードに引き継ぐローカル状態はない。Redisの永続冪等キー、キャリブレーション、PERCLOS状態、および秒単位score集計のcurrent/pending状態は維持する。Backend受理前のscoreは同じpayloadで再送し、同じUTC秒の別scoreを新規生成してはならない。
 - `complete`、`abandon`、dead-letter の成功条件と再試行不能エラーの分類は [`04-frame-storage-and-queue.md`](./04-frame-storage-and-queue.md) を変更しない。
 
 ## 6. Backend、Outbox、リアルタイム通知の分散

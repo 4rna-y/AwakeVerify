@@ -68,7 +68,7 @@ function requiredFixturePath(value: string | undefined, cwd: string): string {
 }
 
 export function isAzureHttpsEndpoint(url: URL): boolean {
-    return url.protocol === "https:" && /(^|\.)azurewebsites\.net$|(^|\.)azurecontainerapps\.io$/i.test(url.hostname);
+    return url.protocol === "https:" && /(^|\.)azurewebsites\.net$|(^|\.)azurecontainerapps\.io$|(^|\.)awaver\.4rnay\.net$/i.test(url.hostname);
 }
 
 export function isHighLoad(config: Pick<LoadTestConfig, "concurrentSessions" | "durationSeconds" | "framesPerSecond">): boolean {

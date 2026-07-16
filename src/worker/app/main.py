@@ -23,11 +23,17 @@ from urllib.request import Request, urlopen
 
 from app.analyzer.frame_decoder import FrameDecodeError, FrameDecoder, FrameReference, UnsupportedCodecError
 from app.auth import WorkerAuthProvider, WorkerAuthenticationError, create_worker_auth_provider
-from app.perclos import MINIMUM_TTL_SECONDS, RedisPerclosWindow, RedisProcessedFrameStore
+from app.perclos import (
+    MINIMUM_TTL_SECONDS,
+    PendingScoreAggregation,
+    RedisPerclosWindow,
+    RedisProcessedFrameStore,
+    RedisScoreAggregationWindow,
+)
 from shared.tracking.calibration import CalibrationTracker
 from shared.tracking.drowsiness import classify_level, result_for_perclos, should_pause
 from shared.tracking.face_analyzer import FaceAnalyzer
-from shared.tracking.models import CalibrationProgress, CalibrationResult, DrowsinessResult, FaceMetrics
+from shared.tracking.models import CalibrationProgress, CalibrationResult, FaceMetrics
 
 WORKER_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_PATH = WORKER_ROOT / "models" / "face_landmarker.task"
@@ -133,6 +139,7 @@ class WorkerSlot:
     max_delivery_count: int
     stage_metrics: WorkerStageMetrics | None = None
     states: dict[str, SessionAnalysisState] = field(default_factory=dict)
+    score_aggregation: RedisScoreAggregationWindow | None = None
 
 
 @dataclass(frozen=True)
@@ -146,18 +153,28 @@ class FrameEnvelope:
 
 @dataclass(frozen=True)
 class ScoreSample:
-    reference: FrameReference
-    metrics: FaceMetrics
-    drowsiness: DrowsinessResult
+    session_id: str
+    sequence_no: int
+    captured_at: datetime
+    video_time_sec: float
+    perclos: float
+    score: float
+    ear: float
+    pitch_deg: float
+    yaw_deg: float
+
+
+@dataclass(frozen=True)
+class PendingAnalysisResult:
+    payload: dict[str, object]
+    score_window_unix_second: int | None = None
 
 
 @dataclass
 class SessionAnalysisState:
     calibration: CalibrationTracker = field(default_factory=CalibrationTracker)
     calibration_loaded: bool = False
-    score_samples: list[ScoreSample] = field(default_factory=list)
-    score_window_id: datetime | None = None
-    pending_results: dict[int, list[dict[str, object]]] = field(default_factory=dict)
+    pending_results: dict[int, list[PendingAnalysisResult]] = field(default_factory=dict)
     completed_sequences: set[int] = field(default_factory=set)
     completed_order: deque[int] = field(default_factory=lambda: deque(maxlen=150))
 
@@ -594,6 +611,7 @@ def create_worker_slot(config: WorkerConfig, slot_index: int) -> WorkerSlot:
         publisher=publisher,
         perclos_window=create_perclos_window(config),
         processed_frames=create_processed_frame_store(config),
+        score_aggregation=create_score_aggregation_window(config),
         calibration_loader=publisher,
         poll_interval_seconds=config.poll_interval_seconds,
         max_delivery_count=config.max_delivery_count,
@@ -672,6 +690,7 @@ def run_worker_slot(
             publisher=slot.publisher,
             perclos_window=slot.perclos_window,
             processed_frames=slot.processed_frames,
+            score_aggregation=slot.score_aggregation,
             calibration_loader=slot.calibration_loader,
             stage_metrics=slot.stage_metrics,
             states=slot.states,
@@ -686,6 +705,7 @@ def run_worker_slot(
             try:
                 _close_slot_resource(slot.perclos_window)
                 _close_slot_resource(slot.processed_frames)
+                _close_slot_resource(slot.score_aggregation)
             finally:
                 close = getattr(slot.analyzer, "close", None)
                 if callable(close):
@@ -706,6 +726,7 @@ def run_worker_loop(
     publisher: ResultPublisher,
     perclos_window: RedisPerclosWindow,
     processed_frames: RedisProcessedFrameStore | None = None,
+    score_aggregation: RedisScoreAggregationWindow | None = None,
     calibration_loader: CalibrationLoader | None = None,
     stage_metrics: WorkerStageMetrics | None = None,
     states: dict[str, SessionAnalysisState],
@@ -743,6 +764,7 @@ def run_worker_loop(
                     publisher=publisher,
                     perclos_window=perclos_window,
                     processed_frames=processed_frames,
+                    score_aggregation=score_aggregation,
                     stage_metrics=stage_metrics,
                     states=states,
                 )
@@ -831,6 +853,7 @@ def process_frame(
     perclos_window: RedisPerclosWindow,
     states: dict[str, SessionAnalysisState],
     processed_frames: RedisProcessedFrameStore | None = None,
+    score_aggregation: RedisScoreAggregationWindow | None = None,
     stage_metrics: WorkerStageMetrics | None = None,
 ) -> None:
     reference = envelope.reference
@@ -842,7 +865,7 @@ def process_frame(
         state.mark_completed(reference.sequence_no)
         return
     if reference.sequence_no in state.pending_results:
-        _publish_pending_results(publisher, reference.session_id, state, reference.sequence_no)
+        _publish_pending_results(publisher, reference.session_id, state, reference.sequence_no, score_aggregation)
         if processed_frames is not None:
             _ = processed_frames.mark_processed(session_id=reference.session_id, sequence_no=reference.sequence_no)
         state.mark_completed(reference.sequence_no)
@@ -867,8 +890,8 @@ def process_frame(
 
     if state.calibration.status in {"ready", "failed"}:
         _ = state.calibration.start()
-        state.score_samples.clear()
-        state.score_window_id = None
+        if score_aggregation is not None:
+            score_aggregation.clear(session_id=reference.session_id)
 
     inference_started_at = time.monotonic()
     metrics = analyzer.analyze(decoded.image)
@@ -884,32 +907,41 @@ def process_frame(
     )
     was_calibrating = state.calibration.status == "calibrating"
     progress = state.calibration.add_frame(metrics)
-    results: list[dict[str, object]] = []
+    results: list[PendingAnalysisResult] = []
 
     if metrics is None:
-        results.append(tracking_status_payload(reference))
+        results.append(PendingAnalysisResult(tracking_status_payload(reference)))
 
     if was_calibrating and progress.status in {"succeeded", "failed"}:
-        results.append(calibration_status_payload(reference, progress))
+        results.append(PendingAnalysisResult(calibration_status_payload(reference, progress)))
 
     # The terminal calibration frame establishes the threshold but is not itself scored.
     # Subsequent frames update PERCLOS individually. A transition to the next UTC
     # second flushes the preceding second's aggregate, including when this frame has
     # no detected face.
     if progress.status == "succeeded" and not was_calibrating:
-        result = update_drowsiness(
-            state=state,
+        calibration = state.calibration.result
+        if calibration is None:
+            raise RuntimeError("successful calibration has no result")
+        pending_scores = update_drowsiness(
             reference=reference,
             metrics=metrics,
+            calibration=calibration,
             perclos_window=perclos_window,
+            score_aggregation=score_aggregation,
         )
-        if result is not None:
-            results.append(result)
+        results.extend(
+            PendingAnalysisResult(
+                drowsiness_score_payload(pending_score),
+                score_window_unix_second=pending_score.window_unix_second,
+            )
+            for pending_score in pending_scores
+        )
 
     if results:
         state.pending_results[reference.sequence_no] = results
         publish_started_at = time.monotonic()
-        _publish_pending_results(publisher, reference.session_id, state, reference.sequence_no)
+        _publish_pending_results(publisher, reference.session_id, state, reference.sequence_no, score_aggregation)
         publish_duration_ms: float | None = (time.monotonic() - publish_started_at) * 1000
     else:
         publish_duration_ms = None
@@ -964,49 +996,50 @@ def restore_calibration(state: SessionAnalysisState, payload: dict[str, object] 
 
 def update_drowsiness(
     *,
-    state: SessionAnalysisState,
     reference: FrameReference,
     metrics: FaceMetrics | None,
+    calibration: CalibrationResult,
     perclos_window: RedisPerclosWindow,
-) -> dict[str, object] | None:
-    calibration = state.calibration.result
-    if calibration is None:
-        raise RuntimeError("cannot score before successful calibration")
+    score_aggregation: RedisScoreAggregationWindow | None,
+) -> tuple[PendingScoreAggregation, ...]:
+    if score_aggregation is None:
+        raise RuntimeError("score aggregation Redis state is required after successful calibration")
 
-    window_id = reference.captured_at.astimezone(UTC).replace(microsecond=0)
-    result: dict[str, object] | None = None
-    if state.score_window_id is None:
-        state.score_window_id = window_id
-    elif state.score_window_id != window_id:
-        if state.score_samples:
-            result = drowsiness_score_payload(state.score_samples)
-        state.score_samples.clear()
-        state.score_window_id = window_id
-
-    if metrics is None:
-        return result
-
-    is_closed = metrics.ear < calibration.ear_threshold
-    update = perclos_window.append(
-        session_id=reference.session_id,
-        sequence_no=reference.sequence_no,
-        captured_at=reference.captured_at,
-        is_closed=is_closed,
-    )
-    if update.duplicate:
-        return result
-
-    drowsiness = result_for_perclos(
-        perclos=update.perclos,
-        metrics=metrics,
-        is_closed=is_closed,
-        window_frames=len(update.frames),
-    )
-    if len(state.score_samples) < SCORE_AGGREGATION_FRAMES:
-        state.score_samples.append(
-            ScoreSample(reference=reference, metrics=metrics, drowsiness=drowsiness)
+    sample_record: str | None = None
+    if metrics is not None:
+        is_closed = metrics.ear < calibration.ear_threshold
+        update = perclos_window.append(
+            session_id=reference.session_id,
+            sequence_no=reference.sequence_no,
+            captured_at=reference.captured_at,
+            is_closed=is_closed,
         )
-    return result
+        if not update.duplicate:
+            drowsiness = result_for_perclos(
+                perclos=update.perclos,
+                metrics=metrics,
+                is_closed=is_closed,
+                window_frames=len(update.frames),
+            )
+            sample_record = score_sample_record(
+                ScoreSample(
+                    session_id=reference.session_id,
+                    sequence_no=reference.sequence_no,
+                    captured_at=reference.captured_at,
+                    video_time_sec=reference.video_time_sec,
+                    perclos=drowsiness.perclos,
+                    score=drowsiness.score,
+                    ear=metrics.ear,
+                    pitch_deg=metrics.pitch_deg,
+                    yaw_deg=metrics.yaw_deg,
+                )
+            )
+
+    return score_aggregation.advance(
+        session_id=reference.session_id,
+        captured_at=reference.captured_at,
+        sample_record=sample_record,
+    )
 
 
 def _publish_pending_results(
@@ -1014,10 +1047,18 @@ def _publish_pending_results(
     session_id: str,
     state: SessionAnalysisState,
     sequence_no: int,
+    score_aggregation: RedisScoreAggregationWindow | None,
 ) -> None:
     results = state.pending_results[sequence_no]
-    for payload in results:
-        publisher.publish(session_id, payload)
+    for result in results:
+        publisher.publish(session_id, result.payload)
+        if result.score_window_unix_second is not None:
+            if score_aggregation is None:
+                raise RuntimeError("score aggregation Redis state is required to acknowledge a score")
+            _ = score_aggregation.acknowledge(
+                session_id=session_id,
+                window_unix_second=result.score_window_unix_second,
+            )
     del state.pending_results[sequence_no]
 
 
@@ -1052,29 +1093,87 @@ def calibration_status_payload(reference: FrameReference, progress: CalibrationP
     return payload
 
 
-def drowsiness_score_payload(samples: list[ScoreSample]) -> dict[str, object]:
+def score_sample_record(sample: ScoreSample) -> str:
+    return json.dumps(
+        {
+            "sessionId": sample.session_id,
+            "sequenceNo": sample.sequence_no,
+            "capturedAt": iso_timestamp(sample.captured_at),
+            "videoTimeSec": sample.video_time_sec,
+            "perclos": sample.perclos,
+            "score": sample.score,
+            "ear": sample.ear,
+            "pitchDeg": sample.pitch_deg,
+            "yawDeg": sample.yaw_deg,
+        },
+        separators=(",", ":"),
+    )
+
+
+def drowsiness_score_payload(pending: PendingScoreAggregation) -> dict[str, object]:
+    samples = [score_sample_from_record(record) for record in pending.sample_records]
     if not 1 <= len(samples) <= SCORE_AGGREGATION_FRAMES:
         raise ValueError("drowsiness score payload requires one to five samples")
 
     source = samples[-1]
     count = len(samples)
-    perclos = sum(sample.drowsiness.perclos for sample in samples) / count
-    score = sum(sample.drowsiness.score for sample in samples) / count
+    if any(sample.session_id != source.session_id for sample in samples):
+        raise ValueError("drowsiness score samples must belong to one session")
+    perclos = sum(sample.perclos for sample in samples) / count
+    score = sum(sample.score for sample in samples) / count
     level = classify_level(score)
     return {
         "type": "drowsiness_score",
-        "sessionId": source.reference.session_id,
-        "sourceSequenceNo": source.reference.sequence_no,
-        "scoredAt": scored_at_timestamp(source.reference.captured_at),
+        "sessionId": source.session_id,
+        "sourceSequenceNo": source.sequence_no,
+        "scoredAt": scored_at_timestamp(source.captured_at),
         "score": score,
         "level": level,
         "perclos": perclos,
-        "ear": sum(sample.metrics.ear for sample in samples) / count,
-        "pitchDeg": sum(sample.metrics.pitch_deg for sample in samples) / count,
-        "yawDeg": sum(sample.metrics.yaw_deg for sample in samples) / count,
-        "videoTimeSec": source.reference.video_time_sec,
+        "ear": sum(sample.ear for sample in samples) / count,
+        "pitchDeg": sum(sample.pitch_deg for sample in samples) / count,
+        "yawDeg": sum(sample.yaw_deg for sample in samples) / count,
+        "videoTimeSec": source.video_time_sec,
         "shouldPause": should_pause(level, score),
     }
+
+
+def score_sample_from_record(record: str) -> ScoreSample:
+    try:
+        payload = cast(object, json.loads(record))
+        if not isinstance(payload, dict):
+            raise ValueError("score sample is not an object")
+        session_id = payload.get("sessionId")
+        sequence_no = payload.get("sequenceNo")
+        captured_at = payload.get("capturedAt")
+        numeric_names = ("videoTimeSec", "perclos", "score", "ear", "pitchDeg", "yawDeg")
+        numeric_values = [payload.get(name) for name in numeric_names]
+        if (
+            not isinstance(session_id, str)
+            or not session_id
+            or not isinstance(sequence_no, int)
+            or sequence_no <= 0
+            or not isinstance(captured_at, str)
+            or any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) for value in numeric_values)
+        ):
+            raise ValueError("score sample has invalid fields")
+        parsed_captured_at = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+        video_time_sec, perclos, score, ear, pitch_deg, yaw_deg = (float(value) for value in numeric_values)
+        if video_time_sec < 0 or not 0 <= perclos <= 1 or not 0 <= score <= 1:
+            raise ValueError("score sample has out-of-range fields")
+        return ScoreSample(
+            session_id=session_id,
+            sequence_no=sequence_no,
+            captured_at=parsed_captured_at,
+            video_time_sec=video_time_sec,
+            perclos=perclos,
+            score=score,
+            ear=ear,
+            pitch_deg=pitch_deg,
+            yaw_deg=yaw_deg,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("score aggregation Redis sample is invalid") from error
 
 
 def create_perclos_window(config: WorkerConfig) -> RedisPerclosWindow:
@@ -1083,6 +1182,14 @@ def create_perclos_window(config: WorkerConfig) -> RedisPerclosWindow:
 
 def create_processed_frame_store(config: WorkerConfig) -> RedisProcessedFrameStore:
     return RedisProcessedFrameStore(create_redis_client(config), ttl_seconds=config.perclos_ttl_seconds)
+
+
+def create_score_aggregation_window(config: WorkerConfig) -> RedisScoreAggregationWindow:
+    return RedisScoreAggregationWindow(
+        create_redis_client(config),
+        ttl_seconds=config.perclos_ttl_seconds,
+        maximum_samples=SCORE_AGGREGATION_FRAMES,
+    )
 
 
 def create_redis_client(config: WorkerConfig) -> Any:

@@ -106,7 +106,11 @@ score >= 0.75
 
 ## 11. 1秒単位保存仕様と通知の整合性
 
-Workerは顔検出できたフレームごとにPERCLOSと眠気スコアを内部計算する。`capturedAt` をUTCで秒単位に切り捨てた値を集計窓IDとし、次のUTC秒の最初のframeを処理した時点で直前の窓を確定する。直前の窓に顔検出フレームが1件以上あれば、先頭から最大5件を平均した1件のscoreだけを通知・保存する。5件未満の窓も破棄せず、別秒のフレームとは混ぜない。顔未検出だけの窓はscoreを作らない。scoreには集計窓末尾フレームの `sourceSequenceNo`、その窓IDに対応するUTC秒の `scoredAt`、および末尾フレームの `videoTimeSec` を付与する。`videoTimeSec` は動画教材内の再生位置（秒）であり、フレーム番号またはFPSから算出しない。WorkerはPostgreSQLへ直接保存せず、サービス認証済みの `POST /api/sessions/{sessionId}/analysis-results` へ送る。Backendがデータ所有者として、スコア行と通知用Outbox行を同一PostgreSQLトランザクションで保存する。
+Workerは顔検出できたフレームごとにPERCLOSと眠気スコアを内部計算する。`capturedAt` をUTCで秒単位に切り捨てた値を集計窓IDとし、次のUTC秒の最初のframeを処理した時点で直前の窓を確定する。直前の窓に顔検出フレームが1件以上あれば、先頭から最大5件を平均した1件のscoreだけを通知・保存する。5件未満の窓も破棄せず、別秒のフレームとは混ぜない。顔未検出だけの窓はscoreを作らない。scoreには集計窓末尾フレームの `sourceSequenceNo`、その窓IDに対応するUTC秒の `scoredAt`、および末尾フレームの `videoTimeSec` を付与する。`videoTimeSec` は動画教材内の再生位置（秒）であり、フレーム番号またはFPSから算出しない。
+
+秒集計の現在窓と、Backendが `202 Accepted` を返すまでの確定済み・未送信窓はRedisの `score-aggregation:{sessionId}:state` に保持する。WorkerはLuaで現在窓の追加、次秒への遷移、確定窓のpending化、同じ `sequenceNo` の重複除外を原子的に行う。Backend受理後にだけpending窓をackする。したがって、Session slot移動、Worker再起動、Service Bus再配送、またはack前の停止があっても、同じ `sessionId`・UTC秒について異なるscoreを再構成・送信してはならない。ack失敗後の再送は同じ保存payloadを用いるため、Backendの既存冪等受理により安全に完了する。
+
+WorkerはPostgreSQLへ直接保存せず、サービス認証済みの `POST /api/sessions/{sessionId}/analysis-results` へ送る。Backendがデータ所有者として、スコア行と通知用Outbox行を同一PostgreSQLトランザクションで保存する。
 
 保存対象:
 

@@ -27,7 +27,7 @@ Workerは、Service Busから映像フレーム参照を受信し、Blob Storage
 - Workerは各Blobを単独でデコード可能な `image/jpeg` として処理し、フレーム間のデコーダ状態を保持しない。
 - `sequenceNo` の欠落または順序不整合があっても、後続の有効JPEGフレームを破棄しない。
 - Worker再起動後も、次に受信した有効JPEGフレームからただちに処理を再開する。
-- RedisはPERCLOSスライディングウィンドウ、処理済みフレームの冪等性、その他の推論状態管理に使用する。
+- RedisはPERCLOSスライディングウィンドウ、処理済みフレームの冪等性、秒単位score集計とBackend受理前pending scoreの状態管理に使用する。
 - キャリブレーションは5秒間、25フレームで行う。
 - 有効フレームが15フレーム未満の場合、キャリブレーション失敗とする。
 - 正面向き判定は `|Yaw_deg| <= 15` かつ `|Pitch_deg| <= 15` とする。
@@ -224,7 +224,7 @@ PERCLOSは以下の条件で算出する。
 
 ### 10.2 Redis状態管理
 
-Redis上に `perclos:{sessionId}:frames` キーでセッションごとのスライディングウィンドウ状態を保持する。値は `sequenceNo`、`capturedAt`、閉眼判定を含み、顔未検出フレームは追加しない。別キー `processed:{sessionId}:frame:{sequenceNo}` にセッション有効期間をカバーするTTLを設定し、PERCLOSの15秒窓とは独立して処理済みフレームを永続化する。TTLは一次仕様に従い、重複 `sequenceNo` を無視する。
+Redis上に `perclos:{sessionId}:frames` キーでセッションごとのスライディングウィンドウ状態を保持する。値は `sequenceNo`、`capturedAt`、閉眼判定を含み、顔未検出フレームは追加しない。別キー `processed:{sessionId}:frame:{sequenceNo}` にセッション有効期間をカバーするTTLを設定し、PERCLOSの15秒窓とは独立して処理済みフレームを永続化する。`score-aggregation:{sessionId}:state` にはUTC秒ごとの最大5件のsampleと、Backendが202を返すまでの確定済みpending scoreを保持する。TTLは一次仕様に従い、重複 `sequenceNo` を無視する。
 
 Luaスクリプトで原子的に以下を行う。
 
@@ -281,7 +281,7 @@ score >= 0.75
 
 ## 12. 1秒単位結果送信
 
-Workerは顔検出フレームごとにPERCLOSと眠気スコアを内部計算する。`capturedAt` のUTC秒ごとに先頭から最大5件を集計し、次秒の最初のframeを処理した時点で、1件以上ある直前窓を1件のscoreとして送る。5件未満の窓も送信し、別秒のフレームとは混ぜない。顔未検出だけの窓はscoreを送らない。scoreには窓末尾sequence、UTC秒の `scoredAt`、および末尾フレームから受け取った `videoTimeSec` を付与する。`videoTimeSec` は動画教材内の再生位置（秒）であり、Workerがフレーム番号またはFPSから算出・補完しない。WorkerはPostgreSQLへ直接接続・直接保存しない。
+Workerは顔検出フレームごとにPERCLOSと眠気スコアを内部計算する。`capturedAt` のUTC秒ごとに先頭から最大5件を集計し、次秒の最初のframeを処理した時点で、1件以上ある直前窓を1件のscoreとして送る。5件未満の窓も送信し、別秒のフレームとは混ぜない。顔未検出だけの窓はscoreを送らない。scoreには窓末尾sequence、UTC秒の `scoredAt`、および末尾フレームから受け取った `videoTimeSec` を付与する。`videoTimeSec` は動画教材内の再生位置（秒）であり、Workerがフレーム番号またはFPSから算出・補完しない。秒集計のsampleとBackend受理前pending scoreはRedisで原子的に保持し、202後にのみackするため、slot移動・再起動・再配送後も同じUTC秒の異なるscoreを送らない。WorkerはPostgreSQLへ直接接続・直接保存しない。
 
 Backendが所有する保存先:
 

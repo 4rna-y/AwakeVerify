@@ -44,3 +44,16 @@ test("requires an explicit Azure opt-in", () => {
     assert.deepEqual([...config.faultInjection], ["signalr-reconnect", "duplicate-frame"]);
     assert.equal(isHighLoad(config), false);
 });
+
+test("recognizes the Azure demo custom domain as an Azure endpoint", () => {
+    const endpoint = new URL("https://api.awaver.4rnay.net");
+
+    assert.equal(isAzureHttpsEndpoint(endpoint), true);
+    assert.throws(
+        () => loadConfig({
+            API_BASE_URL: endpoint.toString(),
+            FRAME_FIXTURE: "load-test/config.test.ts",
+        }, frontendRoot),
+        /ALLOW_AZURE_LOAD_TEST=true/,
+    );
+});
