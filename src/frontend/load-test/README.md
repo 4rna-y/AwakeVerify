@@ -50,7 +50,7 @@ Session ごとに最大 1 HTTP request だけを in-flight にします。次の
 
 ## 測定値と判定
 
-`summary` は `framesOffered`、`framesSent`、`framesNotSentDueToInFlightLimit`、`acceptedFrames`、`retryableRejections`、`permanentRejections`、`retransmissions`、SignalR 再接続、解析結果、誤配送、timeout、frame-to-result latency を記録します。`frameToResultLatencyMs` は HTTP frame送信開始から対応するSignalR解析通知受信までの end-to-end 値で、`p50`、`p95`、`p99`、最大値を出力します。`framesSent` には retry と duplicate injection による HTTP POST を含みます。
+`summary` は `framesOffered`、`framesSent`、`framesNotSentDueToInFlightLimit`、`acceptedFrames`、`retryableRejections`、`permanentRejections`、`retransmissions`、SignalR 再接続、解析結果、誤配送、timeout、frame-to-result latency を記録します。Feature 08に従い、timeoutは各受理frameではなく、キャリブレーション成功後に確定したUTC秒ごとの `drowsiness_score` 通知だけを対象にする。通知の照合にはWorkerが一意に保存する `scoredAt` を使い、payloadの `sourceSequenceNo` は対応frameのHTTP送信開始時刻を取得してlatencyを測るためだけに使う。送信終了時点の最新UTC秒は、次秒のframeがなければWorkerが確定・通知できないためtimeout対象外とする。`frameToResultLatencyMs` は、通知payloadの `sourceSequenceNo` に対応するHTTP送信開始からSignalR解析通知受信までの end-to-end 値で、`p50`、`p95`、`p99`、最大値を出力します。`framesSent` には retry と duplicate injection による HTTP POST を含みます。
 
 `assertions` は、Session 誤配送がないこと、同一 Session の accepted sequence が後退しないこと、指定した複数 Session が作成されたこと、frame-to-result の `p95 ≤ 2秒` かつ `p99 ≤ 5秒` を出力します。いずれかが偽、または標本がない場合、CLI は失敗終了します。Worker replica / Session slot 分散、Service Bus backlog、Outbox age、ACA replica 数は CLI から直接取得せず、検証環境のメトリクスと実行時刻を照合してください。
 
