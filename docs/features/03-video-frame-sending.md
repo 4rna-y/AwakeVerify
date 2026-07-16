@@ -34,6 +34,7 @@ X-Frame-Video-Time-Sec: 12.4
 
 - `sessionId` はroute parameterと認証CookieのSessionが一致しなければならない。
 - `sequenceNo` は正の整数である。
+- 同じブラウザタブで受講ページをリロードして再開する場合、Frontendは送信開始前に保存した次の `sequenceNo` から採番を再開する。未完了requestとの衝突を避けるため、直前の番号より大きい番号を用い、欠番は許容する。
 - `X-Frame-Captured-At` はUTC timestamp、`X-Frame-Video-Time-Sec` は0以上の有限値である。
 - codecは `Content-Type: image/jpeg` に固定する。JSON、Base64 payload、frame種別、前frame参照を受理しない。
 - bodyは単独でデコード可能なJPEG binaryであり、最大1 MiBとする。proxyとASP.NET Coreの双方で上限を明示し、chunked requestでも上限を超えて読まない。JPEG validityと既存metadata制約を検証する。

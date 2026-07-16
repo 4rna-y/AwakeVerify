@@ -2,6 +2,7 @@ export type StoredStudentSession = {
     sessionId: string;
     calibrationCompleted?: true;
     playbackPositionSec?: number;
+    nextFrameSequenceNo?: number;
 };
 
 export const studentSessionStorageKey = "awaver.studentSession";
@@ -30,6 +31,13 @@ export function readStoredStudentSession(): StoredStudentSession | null {
         ) {
             session.playbackPositionSec = Math.floor(parsed.playbackPositionSec);
         }
+        if (
+            typeof parsed.nextFrameSequenceNo === "number" &&
+            Number.isSafeInteger(parsed.nextFrameSequenceNo) &&
+            parsed.nextFrameSequenceNo > 0
+        ) {
+            session.nextFrameSequenceNo = parsed.nextFrameSequenceNo;
+        }
 
         return session;
     } catch {
@@ -46,9 +54,15 @@ export function markStoredSessionCalibrated(sessionId: string) {
     writeStoredStudentSession({
         sessionId,
         calibrationCompleted: true,
-        ...(existing?.sessionId === sessionId &&
-        existing.playbackPositionSec !== undefined
-            ? { playbackPositionSec: existing.playbackPositionSec }
+        ...(existing?.sessionId === sessionId
+            ? {
+                  ...(existing.playbackPositionSec !== undefined
+                      ? { playbackPositionSec: existing.playbackPositionSec }
+                      : {}),
+                  ...(existing.nextFrameSequenceNo !== undefined
+                      ? { nextFrameSequenceNo: existing.nextFrameSequenceNo }
+                      : {}),
+              }
             : {}),
     });
 }
@@ -65,5 +79,27 @@ export function updateStoredSessionPlaybackPosition(
     writeStoredStudentSession({
         ...existing,
         playbackPositionSec: Math.max(0, Math.floor(playbackPositionSec)),
+    });
+}
+
+export function updateStoredSessionNextFrameSequenceNo(
+    sessionId: string,
+    nextFrameSequenceNo: number,
+) {
+    const existing = readStoredStudentSession();
+    if (
+        existing?.sessionId !== sessionId ||
+        !Number.isSafeInteger(nextFrameSequenceNo) ||
+        nextFrameSequenceNo <= 0
+    ) {
+        return;
+    }
+
+    writeStoredStudentSession({
+        ...existing,
+        nextFrameSequenceNo: Math.max(
+            existing.nextFrameSequenceNo ?? 1,
+            nextFrameSequenceNo,
+        ),
     });
 }

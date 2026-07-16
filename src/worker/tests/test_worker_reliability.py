@@ -227,12 +227,68 @@ class WorkerReliabilityTests(TestCase):
                 states=states,
             )
 
+        process_frame(
+            self.envelope(7, calibration_time + timedelta(seconds=1)),
+            analyzer=MetricsAnalyzer(FaceMetrics(ear=0.1, pitch_deg=0, yaw_deg=0)),
+            decoder=decoder,
+            publisher=publisher,  # type: ignore[arg-type]
+            perclos_window=perclos,
+            states=states,
+        )
+
         score = publisher.payloads[-1]
         self.assertEqual(score["type"], "drowsiness_score")
         self.assertEqual(score["sourceSequenceNo"], 6)
         self.assertEqual(score["scoredAt"], "2026-06-14T10:00:00Z")
         self.assertEqual(score["videoTimeSec"], 1.2)
         self.assertTrue(score["shouldPause"])
+
+    def test_score_window_publishes_a_partial_aggregate_at_the_next_second(self) -> None:
+        redis = RedisDouble()
+        perclos = RedisPerclosWindow(redis)
+        publisher = RecordingPublisher()
+        states: dict[str, SessionAnalysisState] = {
+            self.session_id: SessionAnalysisState(
+                calibration=CalibrationTracker(target_frames=1, min_valid_frames=1)
+            )
+        }
+        decoder = FrameDecoder(decode_payload=lambda payload, codec: payload)
+        calibration_time = datetime(2026, 6, 14, 10, 0, tzinfo=UTC)
+
+        process_frame(
+            self.envelope(1, calibration_time),
+            analyzer=MetricsAnalyzer(FaceMetrics(ear=0.4, pitch_deg=0, yaw_deg=0)),
+            decoder=decoder,
+            publisher=publisher,  # type: ignore[arg-type]
+            perclos_window=perclos,
+            states=states,
+        )
+        for sequence_no in (2, 3):
+            process_frame(
+                self.envelope(
+                    sequence_no,
+                    calibration_time + timedelta(milliseconds=sequence_no * 100),
+                ),
+                analyzer=MetricsAnalyzer(FaceMetrics(ear=0.1, pitch_deg=0, yaw_deg=0)),
+                decoder=decoder,
+                publisher=publisher,  # type: ignore[arg-type]
+                perclos_window=perclos,
+                states=states,
+            )
+
+        process_frame(
+            self.envelope(4, calibration_time + timedelta(seconds=1)),
+            analyzer=MetricsAnalyzer(None),
+            decoder=decoder,
+            publisher=publisher,  # type: ignore[arg-type]
+            perclos_window=perclos,
+            states=states,
+        )
+
+        score = publisher.payloads[-1]
+        self.assertEqual(score["type"], "drowsiness_score")
+        self.assertEqual(score["sourceSequenceNo"], 3)
+        self.assertEqual(score["scoredAt"], "2026-06-14T10:00:00Z")
 
     def test_service_bus_frame_reference_restores_required_video_time_sec(self) -> None:
         message = {
@@ -437,7 +493,7 @@ class WorkerReliabilityTests(TestCase):
         self.assertEqual(state.calibration.status, "succeeded")
         self.assertEqual(state.calibration.result.ear_threshold if state.calibration.result else None, 0.3)
 
-    def test_incomplete_second_window_is_discarded_instead_of_mixed(self) -> None:
+    def test_incomplete_second_window_is_published_without_mixing_seconds(self) -> None:
         redis = RedisDouble()
         perclos = RedisPerclosWindow(redis)
         publisher = RecordingPublisher()
@@ -458,7 +514,10 @@ class WorkerReliabilityTests(TestCase):
         for sequence_no in range(2, 6):
             process_frame(self.envelope(sequence_no, base), analyzer=MetricsAnalyzer(FaceMetrics(0.2, 0, 0)), decoder=decoder, publisher=publisher, perclos_window=perclos, states={self.session_id: state})
         process_frame(self.envelope(6, base + timedelta(seconds=1)), analyzer=MetricsAnalyzer(FaceMetrics(0.2, 0, 0)), decoder=decoder, publisher=publisher, perclos_window=perclos, states={self.session_id: state})
-        self.assertFalse(any(payload["type"] == "drowsiness_score" for payload in publisher.payloads))
+        scores = [payload for payload in publisher.payloads if payload["type"] == "drowsiness_score"]
+        self.assertEqual(len(scores), 1)
+        self.assertEqual(scores[0]["sourceSequenceNo"], 5)
+        self.assertEqual(scores[0]["scoredAt"], "2026-06-14T10:00:00Z")
 
     def test_sequence_gap_is_analyzed_as_an_independent_jpeg(self) -> None:
         class RecordingAnalyzer:

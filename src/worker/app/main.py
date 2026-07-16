@@ -157,7 +157,6 @@ class SessionAnalysisState:
     calibration_loaded: bool = False
     score_samples: list[ScoreSample] = field(default_factory=list)
     score_window_id: datetime | None = None
-    score_window_complete: bool = False
     pending_results: dict[int, list[dict[str, object]]] = field(default_factory=dict)
     completed_sequences: set[int] = field(default_factory=set)
     completed_order: deque[int] = field(default_factory=lambda: deque(maxlen=150))
@@ -869,6 +868,7 @@ def process_frame(
     if state.calibration.status in {"ready", "failed"}:
         _ = state.calibration.start()
         state.score_samples.clear()
+        state.score_window_id = None
 
     inference_started_at = time.monotonic()
     metrics = analyzer.analyze(decoded.image)
@@ -893,8 +893,10 @@ def process_frame(
         results.append(calibration_status_payload(reference, progress))
 
     # The terminal calibration frame establishes the threshold but is not itself scored.
-    # Scoring starts on subsequent detected frames.
-    if progress.status == "succeeded" and not was_calibrating and metrics is not None:
+    # Subsequent frames update PERCLOS individually. A transition to the next UTC
+    # second flushes the preceding second's aggregate, including when this frame has
+    # no detected face.
+    if progress.status == "succeeded" and not was_calibrating:
         result = update_drowsiness(
             state=state,
             reference=reference,
@@ -964,7 +966,7 @@ def update_drowsiness(
     *,
     state: SessionAnalysisState,
     reference: FrameReference,
-    metrics: FaceMetrics,
+    metrics: FaceMetrics | None,
     perclos_window: RedisPerclosWindow,
 ) -> dict[str, object] | None:
     calibration = state.calibration.result
@@ -972,10 +974,17 @@ def update_drowsiness(
         raise RuntimeError("cannot score before successful calibration")
 
     window_id = reference.captured_at.astimezone(UTC).replace(microsecond=0)
-    if state.score_window_id != window_id:
+    result: dict[str, object] | None = None
+    if state.score_window_id is None:
         state.score_window_id = window_id
+    elif state.score_window_id != window_id:
+        if state.score_samples:
+            result = drowsiness_score_payload(state.score_samples)
         state.score_samples.clear()
-        state.score_window_complete = False
+        state.score_window_id = window_id
+
+    if metrics is None:
+        return result
 
     is_closed = metrics.ear < calibration.ear_threshold
     update = perclos_window.append(
@@ -985,10 +994,7 @@ def update_drowsiness(
         is_closed=is_closed,
     )
     if update.duplicate:
-        return None
-
-    if state.score_window_complete:
-        return None
+        return result
 
     drowsiness = result_for_perclos(
         perclos=update.perclos,
@@ -996,14 +1002,11 @@ def update_drowsiness(
         is_closed=is_closed,
         window_frames=len(update.frames),
     )
-    state.score_samples.append(ScoreSample(reference=reference, metrics=metrics, drowsiness=drowsiness))
     if len(state.score_samples) < SCORE_AGGREGATION_FRAMES:
-        return None
-
-    samples = state.score_samples[:SCORE_AGGREGATION_FRAMES]
-    state.score_samples.clear()
-    state.score_window_complete = True
-    return drowsiness_score_payload(samples)
+        state.score_samples.append(
+            ScoreSample(reference=reference, metrics=metrics, drowsiness=drowsiness)
+        )
+    return result
 
 
 def _publish_pending_results(
@@ -1050,8 +1053,8 @@ def calibration_status_payload(reference: FrameReference, progress: CalibrationP
 
 
 def drowsiness_score_payload(samples: list[ScoreSample]) -> dict[str, object]:
-    if len(samples) != SCORE_AGGREGATION_FRAMES:
-        raise ValueError("drowsiness score payload requires exactly five samples")
+    if not 1 <= len(samples) <= SCORE_AGGREGATION_FRAMES:
+        raise ValueError("drowsiness score payload requires one to five samples")
 
     source = samples[-1]
     count = len(samples)

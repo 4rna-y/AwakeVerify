@@ -74,7 +74,7 @@
 33. 有効フレームが15フレーム以上の場合、Workerが `EAR_open` と `EAR_threshold` を算出する。
 34. Workerがサービス資格情報でキャリブレーション結果をBackendへ送信する。Backendがトランザクション内で `calibrations` と通知Outboxを保存する。
 35. Workerが以後のフレームでRedisのPERCLOS状態を更新し、眠気スコアを算出する。
-36. Workerが1秒単位のスコアをBackendへ送信し、Backendが `drowsiness_scores` と通知Outboxを同一トランザクションで保存する。
+36. Workerが顔検出フレームごとに内部計算を行い、直前のUTC秒に1件以上あった最大5件の集計scoreを1秒ごとにBackendへ送信する。Backendが `drowsiness_scores` と通知Outboxを同一トランザクションで保存する。
 37. BackendのOutboxディスパッチャーが保存済み結果をSignalRで配信する。配信失敗時は再試行し、保存済み解析結果を失わない。
 38. フロントエンドが現在の眠気レベルを表示する。
 39. `level` が `normal`、`caution`、または `warning` の場合、動画再生を継続する。
@@ -105,7 +105,7 @@
 - キャリブレーションに失敗した場合は、[`calibration-retry.md`](./calibration-retry.md) に分岐する。
 - 顔未検出が発生した場合は、[`face-not-detected-warning.md`](./face-not-detected-warning.md) に分岐する。
 - 眠気レベルが `danger` になった場合は、[`drowsiness-auto-pause-resume.md`](./drowsiness-auto-pause-resume.md) に分岐する。
-- キャリブレーション成功後に同一ブラウザタブでリロードした場合は、保持した `sessionId` とHttpOnly Cookieを照合し、Backendに保存されたキャリブレーション結果を確認する。保存済みの動画進捗へ復元して再接続後、画面中央の再生ボタンを押した場合のみ受講を開始する。保存結果がない場合はキャリブレーションを実施する。
+- キャリブレーション成功後に同一ブラウザタブでリロードした場合は、保持した `sessionId` とHttpOnly Cookieを照合し、Backendに保存されたキャリブレーション結果を確認する。保存済みの動画進捗と次のframe連番へ復元して再接続後、画面中央の再生ボタンを押した場合のみ受講を開始する。再開後のframeは、リロード前に送信済みまたは送信中だったframeと同じ連番を使用しない。保存結果がない場合はキャリブレーションを実施する。
 
 ## 8. 関連データ
 

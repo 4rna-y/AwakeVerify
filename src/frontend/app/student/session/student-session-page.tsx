@@ -31,6 +31,7 @@ import {
     markStoredSessionCalibrated,
     readStoredStudentSession,
     studentSessionStorageKey,
+    updateStoredSessionNextFrameSequenceNo,
     updateStoredSessionPlaybackPosition,
 } from "../student-session-storage";
 
@@ -389,6 +390,7 @@ export default function StudentSessionPage({ lessonVideoUrl }: { lessonVideoUrl:
 
             restoredPlaybackPositionRef.current =
                 storedSession.playbackPositionSec ?? null;
+            sequenceNoRef.current = storedSession.nextFrameSequenceNo ?? 1;
             playbackPositionRef.current = storedSession.playbackPositionSec ?? 0;
             setPlaybackPosition(storedSession.playbackPositionSec ?? 0);
             setSessionId(storedSession.sessionId);
@@ -1259,6 +1261,10 @@ export default function StudentSessionPage({ lessonVideoUrl }: { lessonVideoUrl:
         if (sendingRef.current) {
             return;
         }
+        updateStoredSessionNextFrameSequenceNo(
+            activeSessionId,
+            sequenceNoRef.current,
+        );
 
         sendingRef.current = true;
         try {

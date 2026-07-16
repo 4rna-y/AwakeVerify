@@ -314,7 +314,7 @@ X-Frame-Video-Time-Sec: <non-negative finite value>
 <raw JPEG bytes>
 ```
 
-- JPEG bodyは1 MiB以下、`sequenceNo`はcaptureごとに単調増加、`capturedAt`はUTC、`videoTimeSec`は0以上の有限値とする。
+- JPEG bodyは1 MiB以下、`sequenceNo`はcaptureごとに単調増加、`capturedAt`はUTC、`videoTimeSec`は0以上の有限値とする。同じタブでリロードして再開する場合は、送信開始前に保存した次番号から採番を再開し、既存フレームと同じ番号を別内容で送らない。
 - Sessionごとに最大1 HTTP requestだけをin-flightにする。5fpsの次tickに前requestが完了していなければframeをqueueせず、captureしたsequenceをskipして`framesNotSentDueToInFlightLimit`を増やす。
 - `202`はdurable acceptanceである。`503`/`429`（`Retry-After`があれば従う）だけを同じsequence、metadata、JPEG bytesで再送する。`400`/`401`/`403`/`409`/`413`はpermanent failureとして再送しない。
 - SignalRの接続、再接続、`JoinSession(sessionId)`と解析結果の誤配送検出は維持するが、frame送信の状態とは独立である。

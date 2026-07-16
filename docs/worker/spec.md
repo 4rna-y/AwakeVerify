@@ -281,7 +281,7 @@ score >= 0.75
 
 ## 12. 1秒単位結果送信
 
-Workerは `capturedAt` のUTC秒ごとに最大5件を集計し、5件未満のまま次秒へ進んだ窓は破棄する。5件揃った窓の末尾sequence、UTC秒の `scoredAt`、および末尾フレームから受け取った `videoTimeSec` を付与してBackend解析結果APIへ送る。`videoTimeSec` は動画教材内の再生位置（秒）であり、Workerがフレーム番号またはFPSから算出・補完しない。WorkerはPostgreSQLへ直接接続・直接保存しない。
+Workerは顔検出フレームごとにPERCLOSと眠気スコアを内部計算する。`capturedAt` のUTC秒ごとに先頭から最大5件を集計し、次秒の最初のframeを処理した時点で、1件以上ある直前窓を1件のscoreとして送る。5件未満の窓も送信し、別秒のフレームとは混ぜない。顔未検出だけの窓はscoreを送らない。scoreには窓末尾sequence、UTC秒の `scoredAt`、および末尾フレームから受け取った `videoTimeSec` を付与する。`videoTimeSec` は動画教材内の再生位置（秒）であり、Workerがフレーム番号またはFPSから算出・補完しない。WorkerはPostgreSQLへ直接接続・直接保存しない。
 
 Backendが所有する保存先:
 
