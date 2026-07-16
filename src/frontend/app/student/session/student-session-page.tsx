@@ -155,6 +155,9 @@ export default function StudentSessionPage({ lessonVideoUrl }: { lessonVideoUrl:
         useState<AnalysisStreamState>("idle");
     const [latestScore, setLatestScore] =
         useState<DrowsinessScoreEvent | null>(null);
+    const [latestScoreReceivedAtMs, setLatestScoreReceivedAtMs] =
+        useState<number | null>(null);
+    const [scoreBadgeNowMs, setScoreBadgeNowMs] = useState(0);
     const [latestTracking, setLatestTracking] =
         useState<TrackingStatusEvent | null>(null);
     const [calibrationStatus, setCalibrationStatus] =
@@ -218,6 +221,18 @@ export default function StudentSessionPage({ lessonVideoUrl }: { lessonVideoUrl:
     useEffect(() => {
         playbackPositionRef.current = playbackPosition;
     }, [playbackPosition]);
+
+    useEffect(() => {
+        if (latestScoreReceivedAtMs === null) {
+            return;
+        }
+
+        const intervalId = window.setInterval(() => {
+            setScoreBadgeNowMs(Date.now());
+        }, 1_000);
+
+        return () => window.clearInterval(intervalId);
+    }, [latestScoreReceivedAtMs]);
 
     useEffect(() => {
         return () => {
@@ -555,7 +570,7 @@ export default function StudentSessionPage({ lessonVideoUrl }: { lessonVideoUrl:
                 return;
             }
 
-            handleAnalysisEvent(analysisEvent);
+            handleAnalysisEvent(analysisEvent, getNotificationReceivedAtMs());
         });
 
         connection.onreconnecting(() => {
@@ -684,14 +699,17 @@ export default function StudentSessionPage({ lessonVideoUrl }: { lessonVideoUrl:
         connectResultStream(activeSessionId);
     }
 
-    function handleAnalysisEvent(analysisEvent: AnalysisEvent) {
+    function handleAnalysisEvent(
+        analysisEvent: AnalysisEvent,
+        receivedAtMs: number,
+    ) {
         if (analysisEvent.type === "calibration_status") {
             handleCalibrationStatus(analysisEvent);
             return;
         }
 
         if (analysisEvent.type === "drowsiness_score") {
-            handleDrowsinessScore(analysisEvent);
+            handleDrowsinessScore(analysisEvent, receivedAtMs);
             return;
         }
 
@@ -743,8 +761,13 @@ export default function StudentSessionPage({ lessonVideoUrl }: { lessonVideoUrl:
         }
     }
 
-    function handleDrowsinessScore(event: DrowsinessScoreEvent) {
+    function handleDrowsinessScore(
+        event: DrowsinessScoreEvent,
+        receivedAtMs: number,
+    ) {
         setLatestScore(event);
+        setLatestScoreReceivedAtMs(receivedAtMs);
+        setScoreBadgeNowMs(receivedAtMs);
         setLatestTracking(null);
 
         if (!isFreshAutomaticControlEvent(event.scoredAt)) {
@@ -1377,6 +1400,9 @@ export default function StudentSessionPage({ lessonVideoUrl }: { lessonVideoUrl:
                             }
                         >
                             score {latestScore.score.toFixed(2)} / {latestScore.level}
+                            {latestScoreReceivedAtMs !== null && (
+                                <> · 更新 {formatElapsedSeconds(scoreBadgeNowMs - latestScoreReceivedAtMs)}秒前</>
+                            )}
                         </Badge>
                     )}
                 </button>
@@ -1876,6 +1902,14 @@ function buildPlaybackEventsPath(sessionId: string) {
 
 function buildFramePath(sessionId: string, sequenceNo: number) {
     return `/api/sessions/${encodeURIComponent(sessionId)}/frames/${sequenceNo}`;
+}
+
+function formatElapsedSeconds(elapsedMs: number) {
+    return Math.max(0, Math.floor(elapsedMs / 1_000));
+}
+
+function getNotificationReceivedAtMs() {
+    return Date.now();
 }
 
 function buildCalibrationPath(sessionId: string) {
