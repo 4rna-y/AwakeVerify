@@ -86,7 +86,10 @@ class RedisDouble:
                 if not duplicate and len(samples) < maximum_samples:
                     samples.append(sample_record)
             self.ttl[key] = ttl_seconds
-            return json.dumps(pending).encode("utf-8")
+            # Redis Lua cjson renders an empty table as an object (`{}`), not
+            # an array (`[]`). Mirror that production response so regression
+            # tests exercise the parser's empty-pending normalization.
+            return (json.dumps(pending) if pending else "{}").encode("utf-8")
         if script == SCORE_AGGREGATION_ACK_SCRIPT:
             window = cast(int, keys_and_args[1])
             ttl_seconds = cast(int, keys_and_args[2])
@@ -298,6 +301,9 @@ class WorkerReliabilityTests(TestCase):
         self.assertEqual(score["scoredAt"], "2026-06-14T10:00:00Z")
         self.assertEqual(score["videoTimeSec"], 1.2)
         self.assertTrue(score["shouldPause"])
+
+    def test_score_aggregation_accepts_redis_lua_empty_table_as_no_pending_window(self) -> None:
+        self.assertEqual(RedisScoreAggregationWindow._parse_pending(b"{}"), ())
 
     def test_score_window_publishes_a_partial_aggregate_at_the_next_second(self) -> None:
         redis = RedisDouble()
