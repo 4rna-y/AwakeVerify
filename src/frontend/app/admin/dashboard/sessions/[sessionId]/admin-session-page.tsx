@@ -19,11 +19,6 @@ type ScoreSeriesKey = "score" | "perclos" | "ear";
 type ScoreSeries = { key: ScoreSeriesKey; label: string; className: string; value: (score: Score) => number };
 type HoveredScorePoint = { scoreIndex: number; seriesKey: ScoreSeriesKey }; 
 
-type SessionSummary = {
-    sessionId: string;
-    latestLevel: DrowsinessLevel | null;
-};
-
 type SessionDetail = {
     sessionId: string;
     studentId: string;
@@ -79,7 +74,6 @@ export default function AdminSessionPage({ sessionId }: { sessionId: string }) {
     const [guardState, setGuardState] = useState<GuardState>("checking");
     const [permissionMessage, setPermissionMessage] = useState<string | null>(null);
     const [detail, setDetail] = useState<SessionDetail | null>(null);
-    const [latestLevel, setLatestLevel] = useState<DrowsinessLevel | null>(null);
     const [scores, setScores] = useState<Score[]>([]);
     const [playbackEvents, setPlaybackEvents] = useState<PlaybackEvent[]>([]);
     const [calibration, setCalibration] = useState<Calibration | null>(null);
@@ -111,14 +105,13 @@ export default function AdminSessionPage({ sessionId }: { sessionId: string }) {
         setDetailLoadState("loading");
         setDetailError(null);
         try {
-            const [detailResponse, scoresResponse, eventsResponse, sessionsResponse, calibrationResponse] = await Promise.all([
+            const [detailResponse, scoresResponse, eventsResponse, calibrationResponse] = await Promise.all([
                 apiFetch(`/api/dashboard/sessions/${encodeURIComponent(sessionId)}`, { cache: "no-store" }),
                 apiFetch(`/api/dashboard/sessions/${encodeURIComponent(sessionId)}/scores`, { cache: "no-store" }),
                 apiFetch(`/api/dashboard/sessions/${encodeURIComponent(sessionId)}/playback-events`, { cache: "no-store" }),
-                apiFetch("/api/dashboard/sessions", { cache: "no-store" }),
                 apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/calibration`, { cache: "no-store" }),
             ]);
-            const responses = [detailResponse, scoresResponse, eventsResponse, sessionsResponse, calibrationResponse];
+            const responses = [detailResponse, scoresResponse, eventsResponse, calibrationResponse];
             if (responses.some(handleProtectedResponse)) return;
             if ([detailResponse, scoresResponse, eventsResponse].some((response) => !response.ok) || (calibrationResponse.status !== 204 && !calibrationResponse.ok)) {
                 throw new Error("選択したセッションの詳細を取得できませんでした。");
@@ -130,13 +123,11 @@ export default function AdminSessionPage({ sessionId }: { sessionId: string }) {
                 eventsResponse.json() as Promise<PlaybackEvent[]>,
                 calibrationResponse.status === 204 ? Promise.resolve(null) : calibrationResponse.json() as Promise<Calibration>,
             ]);
-            const summaries = sessionsResponse.ok ? await sessionsResponse.json() as SessionSummary[] : [];
             if (requestId !== detailRequestId.current) return;
             setDetail(nextDetail);
             setScores(nextScores);
             setPlaybackEvents(nextEvents);
             setCalibration(nextCalibration);
-            setLatestLevel(summaries.find((summary) => summary.sessionId === sessionId)?.latestLevel ?? null);
             setDetailLoadState("idle");
         } catch (error) {
             if (requestId !== detailRequestId.current) return;
@@ -191,7 +182,6 @@ export default function AdminSessionPage({ sessionId }: { sessionId: string }) {
             if (!active || !isRecord(payload) || payload.sessionId !== sessionId) return;
             if (isDrowsinessScoreEvent(payload)) {
                 setScores((current) => upsertScore(current, payload));
-                setLatestLevel(payload.level);
             } else if (isTrackingStatusEvent(payload)) {
                 setTrackingStatus(payload.status);
             } else if (isCalibrationStatusEvent(payload)) {
@@ -296,7 +286,6 @@ export default function AdminSessionPage({ sessionId }: { sessionId: string }) {
                             <span>学籍番号: {detail.studentId}</span>
                             <span>開始: {formatDateTime(detail.startedAt)}</span>
                             <span>終了: {detail.endedAt ? formatDateTime(detail.endedAt) : "受講中"}</span>
-                            <span>最新レベル: <LevelBadge level={latestLevel} /></span>
                             <span>トラッキング: <TrackingBadge status={trackingStatus} /></span>
                         </div>
                     ) : <p className="text-muted-foreground">セッション詳細はありません。</p>}
@@ -311,11 +300,6 @@ export default function AdminSessionPage({ sessionId }: { sessionId: string }) {
             </Card>
         </main>
     );
-}
-
-function LevelBadge({ level }: { level: DrowsinessLevel | null }) {
-    const variant = level === "danger" ? "destructive" : level === "warning" ? "outline" : level === "caution" ? "secondary" : "default";
-    return <Badge variant={variant}>{level ?? "未測定"}</Badge>;
 }
 
 function TrackingBadge({ status }: { status: string | null }) {
